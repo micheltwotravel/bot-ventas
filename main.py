@@ -7,7 +7,6 @@ from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 from dateutil.parser import parse
 import re
-import unicodedata
 
 load_dotenv()
 app = FastAPI()
@@ -20,15 +19,8 @@ client = gspread.authorize(creds)
 SHEET_NAME = os.getenv("SHEET_NAME", "D6 Tracking")
 TAB_NAME = os.getenv("TAB_NAME", "Quickbooks")
 
-def normalizar(texto):
-    if not texto:
-        return ""
-    texto = texto.lower().strip()
-    texto = unicodedata.normalize('NFD', texto).encode('ascii', 'ignore').decode('utf-8')
-    return re.sub(r'\s+', ' ', texto)
-
 def resumen_individual(data, rep):
-    data_rep = [r for r in data if normalizar(r.get("Sales", "")) == normalizar(rep)]
+    data_rep = [r for r in data if r.get("Sales", "").lower() == rep.lower()]
     deals = len(data_rep)
     total = sum(float(r.get("Amount", 0)) for r in data_rep)
     return f"*{rep.title()}*: {deals} deals, ${total:,.0f}"
@@ -37,13 +29,16 @@ def filtrar_y_resumir(text):
     sheet = client.open(SHEET_NAME).worksheet(TAB_NAME)
     rows = sheet.get_all_records()
 
+    # Año detectado opcional
     year = datetime.now().year
     match = re.search(r"(20\d{2})", text)
     if match:
         year = int(match.group(1))
-        text = text.replace(match.group(1), "").strip()
-    texto_filtrado = normalizar(text)
+        text = text.replace(match.group(1), "").strip().lower()
+    else:
+        text = text.strip().lower()
 
+    # Filtrar por fecha del año y mes actual
     data = []
     for r in rows:
         try:
@@ -56,7 +51,8 @@ def filtrar_y_resumir(text):
         except:
             continue
 
-    if texto_filtrado == "todos":
+    # Si escribieron "todos", mostrar por cada vendedor
+    if text == "todos":
         reps = sorted(set(r.get("Sales", "N/A") for r in data if r.get("Sales")))
         resumenes = [resumen_individual(data, rep) for rep in reps]
         return "*📊 Ventas por responsable - {} {}*\n\n{}".format(
@@ -64,17 +60,19 @@ def filtrar_y_resumir(text):
             "\n".join(resumenes)
         )
 
-    if texto_filtrado:
+    # Filtro por texto general (Sales, Class, Canal)
+    if text:
         data = [
             r for r in data if
-            texto_filtrado in normalizar(r.get("Sales", "")) or
-            texto_filtrado in normalizar(r.get("Class", "")) or
-            texto_filtrado in normalizar(r.get("Rep", ""))
+            text in str(r.get("Sales", "")).lower() or
+            text in str(r.get("Class", "")).lower() or
+            text in str(r.get("Posting", "")).lower()
         ]
 
     if not data:
         return f"No se encontraron resultados para *{text or 'el mes'}* en {year}."
 
+    # Métricas generales
     deals = len(data)
     amount_total = sum(float(r.get("Amount", 0)) for r in data)
     reps = [r["Sales"] for r in data if r.get("Sales")]
