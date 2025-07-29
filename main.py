@@ -13,7 +13,7 @@ from collections import Counter
 load_dotenv()
 app = FastAPI()
 
-# Google Sheets setup
+# Google Sheets
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds = ServiceAccountCredentials.from_json_keyfile_name("/etc/secrets/google-credentials.json", scope)
 client = gspread.authorize(creds)
@@ -21,11 +21,22 @@ client = gspread.authorize(creds)
 SHEET_NAME = os.getenv("SHEET_NAME", "D6 Tracking")
 TAB_NAME = os.getenv("TAB_NAME", "Quickbooks")
 
-# Normalizador de texto
+# Aliases para nombres equivalentes
+alias = {
+    "sofia millan wedding": "sofia milan",
+    "sofia millan": "sofia milan",
+    "sofía milan": "sofia milan",
+    "sofia milan": "sofia milan",
+}
+
+# Utilidades
 def normalizar(texto):
     return ''.join(c for c in unicodedata.normalize('NFD', texto or "") if unicodedata.category(c) != 'Mn').lower().strip()
 
-# Nombre del mes por número
+def normalizar_nombre(nombre):
+    n = normalizar(nombre)
+    return alias.get(n, n)
+
 def meses_inv(mes_num):
     if not mes_num:
         return ""
@@ -35,14 +46,12 @@ def meses_inv(mes_num):
     ]
     return meses[mes_num].capitalize()
 
-# Resumen individual por responsable
 def resumen_individual(data, rep):
-    data_rep = [r for r in data if normalizar(r.get("Sales", "")) == normalizar(rep)]
+    data_rep = [r for r in data if normalizar_nombre(r.get("Sales", "")) == normalizar_nombre(rep)]
     deals = len(data_rep)
     total = sum(float(r.get("Amount", 0)) for r in data_rep)
     return f"*{rep.title()}*: {deals} deals, ${total:,.0f}"
 
-# Lógica principal de filtrado y resumen
 def filtrar_y_resumir(text):
     sheet = client.open(SHEET_NAME).worksheet(TAB_NAME)
     rows = sheet.get_all_records()
@@ -50,14 +59,14 @@ def filtrar_y_resumir(text):
     text_original = text
     text = normalizar(text.strip()) if text else ""
 
-    # Detectar año
+    # Año
     year = datetime.now().year
     year_match = re.search(r"(20\d{2})", text)
     if year_match:
         year = int(year_match.group(1))
         text = text.replace(year_match.group(1), "").strip()
 
-    # Detectar mes
+    # Mes
     meses = {
         "enero": 1, "febrero": 2, "marzo": 3, "abril": 4,
         "mayo": 5, "junio": 6, "julio": 7, "agosto": 8,
@@ -79,35 +88,36 @@ def filtrar_y_resumir(text):
                 continue
             date_obj = parse(date_str)
             if date_obj.year == year and (mes is None or date_obj.month == mes):
+                r["__date"] = date_obj
                 data.append(r)
         except:
             continue
 
-    # Comando: todos
+    # Agrupación por todos
     if text == "todos":
-        reps = sorted(set(r.get("Sales", "N/A") for r in data if r.get("Sales") and r.get("Sales").strip()))
-        resumenes = [resumen_individual(data, rep) for rep in reps]
+        reps_originales = [r.get("Sales", "N/A") for r in data if r.get("Sales")]
+        reps_norm = sorted(set(normalizar_nombre(rep) for rep in reps_originales))
+        resumenes = [resumen_individual(data, rep) for rep in reps_norm]
         periodo = f"{meses_inv(mes)} {year}" if mes else str(year)
         resultado = f"*📊 Ventas por responsable - {periodo}*\n\n" + "\n".join(resumenes)
         return resultado
 
-    # Comando por responsable
+    # Filtro por responsable (si hay texto restante)
     if text:
-        data = [r for r in data if text in normalizar(r.get("Sales", ""))]
+        data = [r for r in data if text in normalizar(normalizar_nombre(r.get("Sales", "")))]
 
     if not data:
         periodo = f"{meses_inv(mes)} {year}" if mes else str(year)
         return f"No se encontraron resultados para *{text_original}* en {periodo}."
 
-    # Resumen general
     deals = len(data)
     amount_total = sum(float(r.get("Amount", 0)) for r in data)
-    reps = [r["Sales"] for r in data if r.get("Sales")]
+    reps = [normalizar_nombre(r["Sales"]) for r in data if r.get("Sales")]
     ciudades = [r["Class"].split(":")[-1].strip() for r in data if r.get("Class")]
-    canales = [r["Sales"] for r in data if r.get("Sales")]
+    canales = reps
 
     def top(lista): 
-        return Counter(lista).most_common(1)[0][0] if lista else "N/A"
+        return Counter(lista).most_common(1)[0][0].title() if lista else "N/A"
 
     periodo = f"{meses_inv(mes)} {year}" if mes else str(year)
     resumen = f"""📊 *Resumen de ventas - {periodo}*
@@ -119,14 +129,14 @@ def filtrar_y_resumir(text):
 
     return resumen
 
-# Ejecutar procesamiento en segundo plano para evitar timeout
+# Asíncrono para evitar timeout
 def procesar_y_responder(response_url, text):
     resumen = filtrar_y_resumir(text)
     webhook = WebhookClient(response_url)
     webhook.send(text=resumen)
 
-# Endpoint del slash command
 @app.post("/slack/ventas")
 async def ventas(background_tasks: BackgroundTasks, response_url: str = Form(...), text: str = Form("")):
     background_tasks.add_task(procesar_y_responder, response_url, text)
     return {"response_type": "ephemeral", "text": "⏳ Procesando ventas..."}
+
