@@ -7,6 +7,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 from dateutil.parser import parse
 import re
+from collections import Counter
 
 load_dotenv()
 app = FastAPI()
@@ -23,10 +24,8 @@ def filtrar_y_resumir(text):
     sheet = client.open(SHEET_NAME).worksheet(TAB_NAME)
     rows = sheet.get_all_records()
 
-    # Año por defecto actual
+    # Detectar año en texto
     year = datetime.now().year
-
-    # Detectar año explícito en texto
     match = re.search(r"(20\d{2})", text)
     if match:
         year = int(match.group(1))
@@ -34,7 +33,7 @@ def filtrar_y_resumir(text):
     else:
         text = text.strip().lower()
 
-    # Filtrar por mes actual y año
+    # Filtrar por mes y año usando Date
     data = []
     for r in rows:
         try:
@@ -44,13 +43,14 @@ def filtrar_y_resumir(text):
             date_obj = parse(date_str)
             if date_obj.year == year and date_obj.month == datetime.now().month:
                 data.append(r)
-        except:
+        except Exception:
             continue
 
-    # Filtro por texto libre: busca en Sales o Class
+    # Filtro adicional por palabra
     if text:
         data = [
             r for r in data if
+            text in str(r.get("Rep", "")).lower() or
             text in str(r.get("Sales", "")).lower() or
             text in str(r.get("Class", "")).lower()
         ]
@@ -61,20 +61,20 @@ def filtrar_y_resumir(text):
     # Métricas
     deals = len(data)
     amount_total = sum(float(r.get("Amount", 0)) for r in data)
-    responsables = [r["Sales"] for r in data if r.get("Sales")]
+
+    reps = [r["Sales"] for r in data if r.get("Sales")]
     ciudades = [r["Class"].split(":")[1] for r in data if "Class" in r and ":" in r["Class"]]
 
-    def top(lista):
-        return max(set(lista), key=lista.count) if lista else "N/A"
+    def top(lista): return Counter(lista).most_common(1)[0][0] if lista else "N/A"
 
     resumen = f"""
 📊 *Resumen de ventas - {datetime.now().strftime('%B %Y')}*
 
 • Deals: *{deals}*
 • Monto total estimado: *${amount_total:,.0f}*
-• Responsable top: *{top(responsables)}*
+• Responsable top: *{top(reps)}*
 • Ciudad top: *{top(ciudades)}*
-""".strip()
+    """.strip()
 
     return resumen
 
@@ -84,4 +84,3 @@ async def ventas(response_url: str = Form(...), text: str = Form("")):
     webhook = WebhookClient(response_url)
     webhook.send(text=resumen)
     return {"status": "ok"}
-
