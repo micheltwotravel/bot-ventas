@@ -6,8 +6,8 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 from dateutil.parser import parse
+import unicodedata
 import re
-import calendar
 
 load_dotenv()
 app = FastAPI()
@@ -20,41 +20,27 @@ client = gspread.authorize(creds)
 SHEET_NAME = os.getenv("SHEET_NAME", "D6 Tracking")
 TAB_NAME = os.getenv("TAB_NAME", "Quickbooks")
 
-def detectar_mes(texto):
-    texto = texto.lower()
-    for i in range(1, 13):
-        nombre_mes = calendar.month_name[i].lower()
-        if nombre_mes in texto:
-            return i
-    return None
+def normalizar(txt):
+    txt = str(txt).lower()
+    txt = unicodedata.normalize('NFD', txt).encode('ascii', 'ignore').decode("utf-8")
+    return txt.strip()
 
 def filtrar_y_resumir(text):
     sheet = client.open(SHEET_NAME).worksheet(TAB_NAME)
     rows = sheet.get_all_records()
 
+    # Año por defecto actual
     year = datetime.now().year
-    mes_actual = datetime.now().month
 
-    # Buscar si hay un año escrito
+    # Buscar si se menciona un año en el texto
     match = re.search(r"(20\d{2})", text)
     if match:
         year = int(match.group(1))
-        text = re.sub(r"\b" + match.group(1) + r"\b", "", text)
+        text = text.replace(match.group(1), "").strip()
 
-    # Detectar mes por nombre en el texto
-    mes_detectado = detectar_mes(text)
-    if mes_detectado:
-        mes_actual = mes_detectado
-        for i in range(1, 13):
-            nombre = calendar.month_name[i].lower()
-            sin_acentos = nombre.translate(str.maketrans("áéíóú", "aeiou"))
-            text = text.replace(nombre, "")
-            text = text.replace(sin_acentos, "")
+    texto_normalizado = normalizar(text)
 
-    # Limpiar texto para filtro libre
-    text = re.sub(r"\s+", " ", text).strip().lower()
-
-    # Filtrar por mes y año
+    # Filtrar por mes actual y año
     data = []
     for r in rows:
         try:
@@ -62,17 +48,17 @@ def filtrar_y_resumir(text):
             if not date_str:
                 continue
             date_obj = parse(date_str)
-            if date_obj.year == year and date_obj.month == mes_actual:
+            if date_obj.year == year and date_obj.month == datetime.now().month:
                 data.append(r)
         except:
             continue
 
-    # Filtrar si se indicó texto (por responsable o ciudad)
-    if text:
+    # Filtro por texto libre (responsable o ciudad)
+    if texto_normalizado:
         data = [
             r for r in data if
-            text in str(r.get("Sales", "")).lower() or
-            text in str(r.get("Class", "")).lower()
+            texto_normalizado in normalizar(r.get("Sales", "")) or
+            texto_normalizado in normalizar(r.get("Class", ""))
         ]
 
     if not data:
@@ -81,14 +67,14 @@ def filtrar_y_resumir(text):
     # Métricas
     deals = len(data)
     amount_total = sum(float(r.get("Amount", 0)) for r in data)
-    responsables = [r.get("Sales", "").strip() for r in data if r.get("Sales")]
-    ciudades = [r.get("Class", "").split(":")[1].strip() for r in data if ":" in r.get("Class", "")]
+    responsables = [r["Sales"] for r in data if r.get("Sales")]
+    ciudades = [r["Class"].split(":")[1] for r in data if "Class" in r and ":" in r["Class"]]
 
     def top(lista):
         return max(set(lista), key=lista.count) if lista else "N/A"
 
     resumen = f"""
-📊 *Resumen de ventas - {calendar.month_name[mes_actual]} {year}*
+📊 *Resumen de ventas - {datetime.now().strftime('%B %Y')}*
 
 • Deals: *{deals}*
 • Monto total estimado: *${amount_total:,.0f}*
@@ -104,3 +90,4 @@ async def ventas(response_url: str = Form(...), text: str = Form("")):
     webhook = WebhookClient(response_url)
     webhook.send(text=resumen)
     return {"status": "ok"}
+
