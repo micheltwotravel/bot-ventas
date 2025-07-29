@@ -13,7 +13,7 @@ app = FastAPI()
 
 # Google Sheets setup
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_name("google-credentials.json", scope)
+creds = ServiceAccountCredentials.from_json_keyfile_name("/etc/secrets/google-credentials.json", scope)
 client = gspread.authorize(creds)
 
 SHEET_NAME = os.getenv("SHEET_NAME", "D6 Tracking")
