@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Form
+from fastapi import FastAPI, Form, BackgroundTasks
 from slack_sdk.webhook import WebhookClient
 from dotenv import load_dotenv
 import os
@@ -20,7 +20,6 @@ client = gspread.authorize(creds)
 SHEET_NAME = os.getenv("SHEET_NAME", "D6 Tracking")
 TAB_NAME = os.getenv("TAB_NAME", "Quickbooks")
 
-# Normalizador para quitar tildes y bajar a minúscula
 def normalizar(texto):
     return ''.join(c for c in unicodedata.normalize('NFD', texto or "") if unicodedata.category(c) != 'Mn').lower().strip()
 
@@ -34,18 +33,15 @@ def filtrar_y_resumir(text):
     sheet = client.open(SHEET_NAME).worksheet(TAB_NAME)
     rows = sheet.get_all_records()
     
-    # Normalizar el texto de búsqueda
     text_original = text
     text = normalizar(text.strip()) if text else ""
     
-    # Año detectado
     year = datetime.now().year
     year_match = re.search(r"(20\d{2})", text)
     if year_match:
         year = int(year_match.group(1))
         text = text.replace(year_match.group(1), "").strip()
     
-    # Filtrar por año
     data = []
     for r in rows:
         try:
@@ -58,11 +54,7 @@ def filtrar_y_resumir(text):
         except:
             continue
 
-    # DEBUG info
     debug_info = f"DEBUG - Total registros {year}: {len(data)}\n"
-    if data:
-        sales_unicos = set(r.get("Sales", "") for r in data if r.get("Sales"))
-        debug_info += f"Sales únicos: {list(sales_unicos)[:5]}\n"
 
     if text == "todos":
         reps = sorted(set(r.get("Sales", "N/A") for r in data if r.get("Sales") and r.get("Sales").strip()))
@@ -71,7 +63,6 @@ def filtrar_y_resumir(text):
         return debug_info + "\n" + resultado
 
     if text:
-        # Filtro por texto en campo Sales
         filtered_data = []
         for r in data:
             sales_value = r.get("Sales", "")
@@ -87,7 +78,6 @@ def filtrar_y_resumir(text):
     if not data:
         return debug_info + f"\nNo se encontraron resultados para *{text_original}* en {year}."
 
-    # Métricas generales
     deals = len(data)
     amount_total = sum(float(r.get("Amount", 0)) for r in data)
 
@@ -111,9 +101,13 @@ def filtrar_y_resumir(text):
 
     return debug_info + "\n" + resumen
 
-@app.post("/slack/ventas")
-async def ventas(response_url: str = Form(...), text: str = Form("")):
+# Ejecutar en segundo plano para evitar timeout
+def procesar_y_responder(response_url, text):
     resumen = filtrar_y_resumir(text)
     webhook = WebhookClient(response_url)
     webhook.send(text=resumen)
-    return {"status": "sent"}
+
+@app.post("/slack/ventas")
+async def ventas(background_tasks: BackgroundTasks, response_url: str = Form(...), text: str = Form("")):
+    background_tasks.add_task(procesar_y_responder, response_url, text)
+    return {"response_type": "ephemeral", "text": "⏳ Procesando ventas..."}
