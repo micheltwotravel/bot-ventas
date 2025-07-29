@@ -50,12 +50,16 @@ def filtrar_y_resumir(text):
     if text:
         data = [
             r for r in data if
-            text in str(r.get("Sales", "")).lower() or
-            text in str(r.get("Class", "")).lower()
+            text in str(r.get("Sales", "")).strip().lower() or
+            text in str(r.get("Class", "")).strip().lower()
         ]
 
     if not data:
-        return f"No se encontraron resultados para *{text or 'el mes'}* en {year}."
+        # Sugerencia de valores válidos si no encuentra nada
+        responsables_unicos = sorted(set(r.get("Sales", "").strip() for r in rows if r.get("Sales")))
+        ciudades_unicas = sorted(set(r.get("Class", "").split(":")[1].strip() for r in rows if "Class" in r and ":" in r["Class"]))
+        sugerencia = f"*Nombres válidos:* {', '.join(responsables_unicos)}\n*Ciudades válidas:* {', '.join(ciudades_unicas)}"
+        return f"No se encontraron resultados para *{text or 'el mes'}* en {year}.\n\n{sugerencia}"
 
     # Métricas
     deals = len(data)
