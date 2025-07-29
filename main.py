@@ -25,7 +25,8 @@ def filtrar_y_resumir(text):
 
     # Año por defecto actual
     year = datetime.now().year
-    # Buscar si se menciona un año en el texto
+
+    # Detectar año en el texto (ej: "2024", "sofia 2025", etc.)
     match = re.search(r"(20\d{2})", text)
     if match:
         year = int(match.group(1))
@@ -46,22 +47,21 @@ def filtrar_y_resumir(text):
         except:
             continue
 
-    # Filtro por texto libre (responsable o ciudad)
+    # Filtro por texto libre (en Sales o en Class)
     if text:
         data = [
             r for r in data if
-            text in str(r.get("Sales", "")).strip().lower() or
-            text in str(r.get("Class", "")).strip().lower()
+            text in str(r.get("Sales", "")).lower().strip() or
+            text in str(r.get("Class", "")).lower().strip()
         ]
 
     if not data:
-        # Sugerencia de valores válidos si no encuentra nada
         responsables_unicos = sorted(set(r.get("Sales", "").strip() for r in rows if r.get("Sales")))
         ciudades_unicas = sorted(set(r.get("Class", "").split(":")[1].strip() for r in rows if "Class" in r and ":" in r["Class"]))
-        sugerencia = f"*Nombres válidos:* {', '.join(responsables_unicos)}\n*Ciudades válidas:* {', '.join(ciudades_unicas)}"
-        return f"No se encontraron resultados para *{text or 'el mes'}* en {year}.\n\n{sugerencia}"
+        sugerencia = f"*Responsables válidos:* {', '.join(responsables_unicos)}\n*Ciudades válidas:* {', '.join(ciudades_unicas)}"
+        return f"No se encontraron resultados para *{text or 'el mes actual'}* en {year}.\n\n{sugerencia}"
 
-    # Métricas
+    # Métricas del resumen
     deals = len(data)
     amount_total = sum(float(r.get("Amount", 0)) for r in data)
     responsables = [r["Sales"] for r in data if r.get("Sales")]
