@@ -7,7 +7,6 @@ from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 from dateutil.parser import parse
 import re
-import unicodedata
 
 load_dotenv()
 app = FastAPI()
@@ -21,10 +20,10 @@ SHEET_NAME = os.getenv("SHEET_NAME", "D6 Tracking")
 TAB_NAME = os.getenv("TAB_NAME", "Quickbooks")
 
 def normalizar(texto):
-    return unicodedata.normalize('NFKD', texto).encode('ASCII', 'ignore').decode().lower()
+    return re.sub(r'\s+', ' ', texto.strip().lower())
 
 def resumen_individual(data, rep):
-    data_rep = [r for r in data if normalizar(r.get("Rep", "")) == normalizar(rep)]
+    data_rep = [r for r in data if normalizar(r.get("Sales", "")) == normalizar(rep)]
     deals = len(data_rep)
     total = sum(float(r.get("Amount", 0)) for r in data_rep)
     return f"*{rep.title()}*: {deals} deals, ${total:,.0f}"
@@ -33,7 +32,6 @@ def filtrar_y_resumir(text):
     sheet = client.open(SHEET_NAME).worksheet(TAB_NAME)
     rows = sheet.get_all_records()
 
-    # Año detectado opcional
     year = datetime.now().year
     match = re.search(r"(20\d{2})", text)
     if match:
@@ -42,7 +40,6 @@ def filtrar_y_resumir(text):
     else:
         text = text.strip().lower()
 
-    # Filtrar por fecha (mes actual y año)
     data = []
     for r in rows:
         try:
@@ -55,31 +52,28 @@ def filtrar_y_resumir(text):
         except:
             continue
 
-    # Si es "todos", devolver resumen por cada rep
-    if normalizar(text) == "todos":
-        reps = sorted(set(r.get("Rep", "N/A") for r in data if r.get("Rep")))
+    if text == "todos":
+        reps = sorted(set(r.get("Sales", "N/A") for r in data if r.get("Sales")))
         resumenes = [resumen_individual(data, rep) for rep in reps]
         return "*📊 Ventas por responsable - {} {}*\n\n{}".format(
             datetime.now().strftime("%B"), year,
             "\n".join(resumenes)
         )
 
-    # Filtro general
     if text:
         data = [
             r for r in data if
-            normalizar(text) in normalizar(str(r.get("Rep", ""))) or
-            normalizar(text) in normalizar(str(r.get("Sales", ""))) or
-            normalizar(text) in normalizar(str(r.get("Class", "")))
+            text in normalizar(r.get("Sales", "")) or
+            text in normalizar(r.get("Class", "")) or
+            text in normalizar(r.get("Rep", ""))  # opcional
         ]
 
     if not data:
         return f"No se encontraron resultados para *{text or 'el mes'}* en {year}."
 
-    # Métricas generales
     deals = len(data)
     amount_total = sum(float(r.get("Amount", 0)) for r in data)
-    reps = [r["Rep"] for r in data if r.get("Rep")]
+    reps = [r["Sales"] for r in data if r.get("Sales")]
     ciudades = [r["Class"].split(":")[1] for r in data if "Class" in r and ":" in r["Class"]]
     canales = [r["Sales"] for r in data if r.get("Sales")]
 
@@ -103,3 +97,4 @@ async def ventas(response_url: str = Form(...), text: str = Form("")):
     webhook = WebhookClient(response_url)
     webhook.send(text=resumen)
     return {"status": "ok"}
+
