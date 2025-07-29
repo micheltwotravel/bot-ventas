@@ -32,16 +32,15 @@ def filtrar_y_resumir(text):
     else:
         text = text.strip().lower()
 
-    # Filtrar por año actual
+    # Filtrar datos con validación de año y mes
     data = [
-    r for r in rows
-    if r.get("Year", "").isdigit()
-    and r.get("Month", "").isdigit()
-    and int(r["Year"]) == year
-    and int(r["Month"]) == datetime.now().month
-]
+        r for r in rows
+        if r.get("Year", "").isdigit() and r.get("Month", "").isdigit()
+        and int(r["Year"]) == year
+        and int(r["Month"]) == datetime.now().month
+    ]
 
-    # Filtro opcional por texto
+    # Filtro opcional por texto (persona, canal, ciudad)
     if text:
         data = [
             r for r in data if
@@ -60,7 +59,8 @@ def filtrar_y_resumir(text):
     ciudades = [r["Class"].split(":")[1] for r in data if "Class" in r and ":" in r["Class"]]
     canales = [r["Sales"] for r in data if r["Sales"]]
 
-    def top(lista): return max(set(lista), key=lista.count) if lista else "N/A"
+    def top(lista):
+        return max(set(lista), key=lista.count) if lista else "N/A"
 
     resumen = f"""
 📊 *Resumen de ventas - {datetime.now().strftime('%B %Y')}*
@@ -76,6 +76,15 @@ def filtrar_y_resumir(text):
 
 @app.post("/slack/ventas")
 async def ventas(response_url: str = Form(...), text: str = Form("")):
-    resumen = filtrar_y_resumir(text)
-    WebhookClient(response_url).send(text=resumen)
-    return {"ok": True}
+    try:
+        resumen = filtrar_y_resumir(text)
+
+        webhook = WebhookClient(response_url)
+        webhook.send(text=resumen)
+
+        return {"status": "ok", "message": "Resumen enviado a Slack"}
+
+    except Exception as e:
+        webhook = WebhookClient(response_url)
+        webhook.send(text=f"❌ Ocurrió un error: `{str(e)}`")
+        return {"status": "error", "message": str(e)}
