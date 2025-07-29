@@ -6,15 +6,8 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 from dateutil.parser import parse
-import calendar
 import re
-import locale
-
-# Establecer español para reconocer nombres de mes
-try:
-    locale.setlocale(locale.LC_TIME, 'es_CO.utf8')
-except:
-    locale.setlocale(locale.LC_TIME, 'es_ES.utf8')
+import calendar
 
 load_dotenv()
 app = FastAPI()
@@ -27,13 +20,11 @@ client = gspread.authorize(creds)
 SHEET_NAME = os.getenv("SHEET_NAME", "D6 Tracking")
 TAB_NAME = os.getenv("TAB_NAME", "Quickbooks")
 
-# Función para detectar mes por nombre
 def detectar_mes(texto):
     texto = texto.lower()
     for i in range(1, 13):
-        mes_es = calendar.month_name[i].lower()
-        mes_en = calendar.month_name[i].lower().translate(str.maketrans("áéíóú", "aeiou"))
-        if mes_es in texto or mes_en in texto:
+        nombre_mes = calendar.month_name[i].lower()
+        if nombre_mes in texto:
             return i
     return None
 
@@ -41,24 +32,29 @@ def filtrar_y_resumir(text):
     sheet = client.open(SHEET_NAME).worksheet(TAB_NAME)
     rows = sheet.get_all_records()
 
-    # Año y mes actuales como default
     year = datetime.now().year
     mes_actual = datetime.now().month
 
-    # Detectar año explícito
+    # Buscar si hay un año escrito
     match = re.search(r"(20\d{2})", text)
     if match:
         year = int(match.group(1))
-        text = text.replace(match.group(1), "").strip().lower()
+        text = re.sub(r"\b" + match.group(1) + r"\b", "", text)
 
-    # Detectar mes por nombre
+    # Detectar mes por nombre en el texto
     mes_detectado = detectar_mes(text)
     if mes_detectado:
         mes_actual = mes_detectado
-        for nombre in calendar.month_name:
-            text = text.replace(nombre.lower(), "").strip()
+        for i in range(1, 13):
+            nombre = calendar.month_name[i].lower()
+            sin_acentos = nombre.translate(str.maketrans("áéíóú", "aeiou"))
+            text = text.replace(nombre, "")
+            text = text.replace(sin_acentos, "")
 
-    # Filtrar datos por fecha
+    # Limpiar texto para filtro libre
+    text = re.sub(r"\s+", " ", text).strip().lower()
+
+    # Filtrar por mes y año
     data = []
     for r in rows:
         try:
@@ -71,8 +67,7 @@ def filtrar_y_resumir(text):
         except:
             continue
 
-    # Filtro por texto libre (responsable o ciudad)
-    text = text.strip().lower()
+    # Filtrar si se indicó texto (por responsable o ciudad)
     if text:
         data = [
             r for r in data if
@@ -86,8 +81,8 @@ def filtrar_y_resumir(text):
     # Métricas
     deals = len(data)
     amount_total = sum(float(r.get("Amount", 0)) for r in data)
-    responsables = [r["Sales"] for r in data if r.get("Sales")]
-    ciudades = [r["Class"].split(":")[1] for r in data if "Class" in r and ":" in r["Class"]]
+    responsables = [r.get("Sales", "").strip() for r in data if r.get("Sales")]
+    ciudades = [r.get("Class", "").split(":")[1].strip() for r in data if ":" in r.get("Class", "")]
 
     def top(lista):
         return max(set(lista), key=lista.count) if lista else "N/A"
