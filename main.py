@@ -73,6 +73,7 @@ def filtrar_y_resumir(text):
 • Ciudad top: *{top(ciudades)}*
 """.strip()
 
+
     return resumen
 
 @app.post("/slack/ventas")
