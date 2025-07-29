@@ -14,7 +14,7 @@ from collections import Counter
 load_dotenv()
 app = FastAPI()
 
-# Google Sheets setup
+# Google Sheets
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds = ServiceAccountCredentials.from_json_keyfile_name("/etc/secrets/google-credentials.json", scope)
 client = gspread.authorize(creds)
@@ -22,6 +22,7 @@ client = gspread.authorize(creds)
 SHEET_NAME = os.getenv("SHEET_NAME", "D6 Tracking")
 TAB_NAME = os.getenv("TAB_NAME", "Quickbooks")
 
+# Aliases para unificar nombres
 alias = {
     "sofia millan wedding": "sofia milan",
     "sofia millan": "sofia milan",
@@ -78,8 +79,8 @@ def filtrar_y_resumir(text):
             text = text.replace(m, "").strip()
             break
 
-    # Comando: top ciudades
-    if "top ciudades" in text:
+    # 🏙️ Comando: top ciudades
+    if "top ciudades" in text_original.lower():
         data_ciudades = []
         for r in rows:
             try:
@@ -115,7 +116,7 @@ def filtrar_y_resumir(text):
         periodo = f"{meses_inv(mes)} {year}" if mes else str(year)
         return f"🏙️ *Top ciudades por ventas - {periodo}*\n" + "\n".join(lines)
 
-    # Normal flow
+    # 🔁 Flujo normal
     data = []
     for r in rows:
         try:
