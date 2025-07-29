@@ -6,7 +6,15 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 from dateutil.parser import parse
+import calendar
 import re
+import locale
+
+# Establecer español para reconocer nombres de mes
+try:
+    locale.setlocale(locale.LC_TIME, 'es_CO.utf8')
+except:
+    locale.setlocale(locale.LC_TIME, 'es_ES.utf8')
 
 load_dotenv()
 app = FastAPI()
@@ -19,22 +27,38 @@ client = gspread.authorize(creds)
 SHEET_NAME = os.getenv("SHEET_NAME", "D6 Tracking")
 TAB_NAME = os.getenv("TAB_NAME", "Quickbooks")
 
+# Función para detectar mes por nombre
+def detectar_mes(texto):
+    texto = texto.lower()
+    for i in range(1, 13):
+        mes_es = calendar.month_name[i].lower()
+        mes_en = calendar.month_name[i].lower().translate(str.maketrans("áéíóú", "aeiou"))
+        if mes_es in texto or mes_en in texto:
+            return i
+    return None
+
 def filtrar_y_resumir(text):
     sheet = client.open(SHEET_NAME).worksheet(TAB_NAME)
     rows = sheet.get_all_records()
 
-    # Año por defecto actual
+    # Año y mes actuales como default
     year = datetime.now().year
+    mes_actual = datetime.now().month
 
-    # Detectar año en el texto (ej: "2024", "sofia 2025", etc.)
+    # Detectar año explícito
     match = re.search(r"(20\d{2})", text)
     if match:
         year = int(match.group(1))
         text = text.replace(match.group(1), "").strip().lower()
-    else:
-        text = text.strip().lower()
 
-    # Filtrar por mes actual y año
+    # Detectar mes por nombre
+    mes_detectado = detectar_mes(text)
+    if mes_detectado:
+        mes_actual = mes_detectado
+        for nombre in calendar.month_name:
+            text = text.replace(nombre.lower(), "").strip()
+
+    # Filtrar datos por fecha
     data = []
     for r in rows:
         try:
@@ -42,26 +66,24 @@ def filtrar_y_resumir(text):
             if not date_str:
                 continue
             date_obj = parse(date_str)
-            if date_obj.year == year and date_obj.month == datetime.now().month:
+            if date_obj.year == year and date_obj.month == mes_actual:
                 data.append(r)
         except:
             continue
 
-    # Filtro por texto libre (en Sales o en Class)
+    # Filtro por texto libre (responsable o ciudad)
+    text = text.strip().lower()
     if text:
         data = [
             r for r in data if
-            text in str(r.get("Sales", "")).lower().strip() or
-            text in str(r.get("Class", "")).lower().strip()
+            text in str(r.get("Sales", "")).lower() or
+            text in str(r.get("Class", "")).lower()
         ]
 
     if not data:
-        responsables_unicos = sorted(set(r.get("Sales", "").strip() for r in rows if r.get("Sales")))
-        ciudades_unicas = sorted(set(r.get("Class", "").split(":")[1].strip() for r in rows if "Class" in r and ":" in r["Class"]))
-        sugerencia = f"*Responsables válidos:* {', '.join(responsables_unicos)}\n*Ciudades válidas:* {', '.join(ciudades_unicas)}"
-        return f"No se encontraron resultados para *{text or 'el mes actual'}* en {year}.\n\n{sugerencia}"
+        return f"No se encontraron resultados para *{text or 'el mes'}* en {year}."
 
-    # Métricas del resumen
+    # Métricas
     deals = len(data)
     amount_total = sum(float(r.get("Amount", 0)) for r in data)
     responsables = [r["Sales"] for r in data if r.get("Sales")]
@@ -71,7 +93,7 @@ def filtrar_y_resumir(text):
         return max(set(lista), key=lista.count) if lista else "N/A"
 
     resumen = f"""
-📊 *Resumen de ventas - {datetime.now().strftime('%B %Y')}*
+📊 *Resumen de ventas - {calendar.month_name[mes_actual]} {year}*
 
 • Deals: *{deals}*
 • Monto total estimado: *${amount_total:,.0f}*
