@@ -7,6 +7,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 from dateutil.parser import parse
 import re
+import unicodedata
 
 load_dotenv()
 app = FastAPI()
@@ -19,8 +20,11 @@ client = gspread.authorize(creds)
 SHEET_NAME = os.getenv("SHEET_NAME", "D6 Tracking")
 TAB_NAME = os.getenv("TAB_NAME", "Quickbooks")
 
+def normalizar(texto):
+    return unicodedata.normalize('NFKD', texto).encode('ASCII', 'ignore').decode().lower()
+
 def resumen_individual(data, rep):
-    data_rep = [r for r in data if r.get("Sales", "").lower() == rep.lower()]
+    data_rep = [r for r in data if normalizar(r.get("Rep", "")) == normalizar(rep)]
     deals = len(data_rep)
     total = sum(float(r.get("Amount", 0)) for r in data_rep)
     return f"*{rep.title()}*: {deals} deals, ${total:,.0f}"
@@ -38,7 +42,7 @@ def filtrar_y_resumir(text):
     else:
         text = text.strip().lower()
 
-    # Filtrar por fecha
+    # Filtrar por fecha (mes actual y año)
     data = []
     for r in rows:
         try:
@@ -51,9 +55,9 @@ def filtrar_y_resumir(text):
         except:
             continue
 
-    # Si es "todos", devolver por cada responsable (Sales)
-    if text == "todos":
-        reps = sorted(set(r.get("Sales", "") for r in data if r.get("Sales")))
+    # Si es "todos", devolver resumen por cada rep
+    if normalizar(text) == "todos":
+        reps = sorted(set(r.get("Rep", "N/A") for r in data if r.get("Rep")))
         resumenes = [resumen_individual(data, rep) for rep in reps]
         return "*📊 Ventas por responsable - {} {}*\n\n{}".format(
             datetime.now().strftime("%B"), year,
@@ -64,8 +68,9 @@ def filtrar_y_resumir(text):
     if text:
         data = [
             r for r in data if
-            text in str(r.get("Sales", "")).lower() or
-            text in str(r.get("Class", "")).lower()
+            normalizar(text) in normalizar(str(r.get("Rep", ""))) or
+            normalizar(text) in normalizar(str(r.get("Sales", ""))) or
+            normalizar(text) in normalizar(str(r.get("Class", "")))
         ]
 
     if not data:
@@ -74,8 +79,9 @@ def filtrar_y_resumir(text):
     # Métricas generales
     deals = len(data)
     amount_total = sum(float(r.get("Amount", 0)) for r in data)
-    reps = [r["Sales"] for r in data if r.get("Sales")]
+    reps = [r["Rep"] for r in data if r.get("Rep")]
     ciudades = [r["Class"].split(":")[1] for r in data if "Class" in r and ":" in r["Class"]]
+    canales = [r["Sales"] for r in data if r.get("Sales")]
 
     def top(lista): return max(set(lista), key=lista.count) if lista else "N/A"
 
@@ -86,6 +92,7 @@ def filtrar_y_resumir(text):
 • Monto total estimado: *${amount_total:,.0f}*
 • Responsable top: *{top(reps)}*
 • Ciudad top: *{top(ciudades)}*
+• Canal top: *{top(canales)}*
 """.strip()
 
     return resumen
