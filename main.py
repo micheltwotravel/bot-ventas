@@ -7,7 +7,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 from dateutil.parser import parse
 import re
-from collections import Counter
+from collections import defaultdict
 
 load_dotenv()
 app = FastAPI()
@@ -20,11 +20,17 @@ client = gspread.authorize(creds)
 SHEET_NAME = os.getenv("SHEET_NAME", "D6 Tracking")
 TAB_NAME = os.getenv("TAB_NAME", "Quickbooks")
 
+def resumen_individual(data, rep):
+    data_rep = [r for r in data if r.get("Rep", "").lower() == rep.lower()]
+    deals = len(data_rep)
+    total = sum(float(r.get("Amount", 0)) for r in data_rep)
+    return f"*{rep.title()}*: {deals} deals, ${total:,.0f}"
+
 def filtrar_y_resumir(text):
     sheet = client.open(SHEET_NAME).worksheet(TAB_NAME)
     rows = sheet.get_all_records()
 
-    # Detectar año en texto
+    # Año detectado opcional
     year = datetime.now().year
     match = re.search(r"(20\d{2})", text)
     if match:
@@ -33,7 +39,7 @@ def filtrar_y_resumir(text):
     else:
         text = text.strip().lower()
 
-    # Filtrar por mes y año usando Date
+    # Filtrar por fecha
     data = []
     for r in rows:
         try:
@@ -43,10 +49,19 @@ def filtrar_y_resumir(text):
             date_obj = parse(date_str)
             if date_obj.year == year and date_obj.month == datetime.now().month:
                 data.append(r)
-        except Exception:
+        except:
             continue
 
-    # Filtro adicional por palabra
+    # Si es "todos", devolver por cada rep
+    if text == "todos":
+        reps = sorted(set(r.get("Rep", "N/A") for r in data if r.get("Rep")))
+        resumenes = [resumen_individual(data, rep) for rep in reps]
+        return "*📊 Ventas por responsable - {} {}*\n\n{}".format(
+            datetime.now().strftime("%B"), year,
+            "\n".join(resumenes)
+        )
+
+    # Filtro general
     if text:
         data = [
             r for r in data if
@@ -58,14 +73,14 @@ def filtrar_y_resumir(text):
     if not data:
         return f"No se encontraron resultados para *{text or 'el mes'}* en {year}."
 
-    # Métricas
+    # Métricas generales
     deals = len(data)
     amount_total = sum(float(r.get("Amount", 0)) for r in data)
-
-    reps = [r["Sales"] for r in data if r.get("Sales")]
+    reps = [r["Rep"] for r in data if r.get("Rep")]
     ciudades = [r["Class"].split(":")[1] for r in data if "Class" in r and ":" in r["Class"]]
+    canales = [r["Sales"] for r in data if r.get("Sales")]
 
-    def top(lista): return Counter(lista).most_common(1)[0][0] if lista else "N/A"
+    def top(lista): return max(set(lista), key=lista.count) if lista else "N/A"
 
     resumen = f"""
 📊 *Resumen de ventas - {datetime.now().strftime('%B %Y')}*
@@ -74,7 +89,8 @@ def filtrar_y_resumir(text):
 • Monto total estimado: *${amount_total:,.0f}*
 • Responsable top: *{top(reps)}*
 • Ciudad top: *{top(ciudades)}*
-    """.strip()
+• Canal top: *{top(canales)}*
+""".strip()
 
     return resumen
 
@@ -84,3 +100,4 @@ async def ventas(response_url: str = Form(...), text: str = Form("")):
     webhook = WebhookClient(response_url)
     webhook.send(text=resumen)
     return {"status": "ok"}
+
