@@ -14,7 +14,9 @@ from collections import Counter
 load_dotenv()
 app = FastAPI()
 
-slack_token = os.getenv("SLACK_BOT_TOKEN")
+with open("/etc/secrets/SLACK_BOT_TOKEN") as f:
+    slack_token = f.read().strip()
+
 slack_client = WebClient(token=slack_token)
 
 # Google Sheets setup
