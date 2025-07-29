@@ -14,18 +14,18 @@ from collections import Counter
 load_dotenv()
 app = FastAPI()
 
-# Google Sheets
+# Google Sheets setup
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds = ServiceAccountCredentials.from_json_keyfile_name("/etc/secrets/google-credentials.json", scope)
 client = gspread.authorize(creds)
 SHEET_NAME = os.getenv("SHEET_NAME", "D6 Tracking")
 TAB_NAME = os.getenv("TAB_NAME", "Quickbooks")
 
-# Alias para unificar nombres
+# Aliases para nombres unificados
 alias = {
     "sofia millan wedding": "sofia milan",
-    "sofia millan": "sofia milan",
-    "sofía milan": "sofia milan"
+    "sofía milan": "sofia milan",
+    "sofia millan": "sofia milan"
 }
 
 def normalizar(texto):
@@ -36,7 +36,8 @@ def normalizar_nombre(nombre):
     return alias.get(n, n)
 
 def meses_inv(mes_num):
-    meses = ["", "enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
+    meses = ["", "enero", "febrero", "marzo", "abril", "mayo", "junio",
+             "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
     return meses[mes_num].capitalize() if mes_num else ""
 
 def resumen_individual(data, rep):
@@ -53,10 +54,10 @@ def filtrar_y_resumir(text):
     t = normalizar(text_orig.strip()) if text_orig else ""
     year = datetime.now().year
 
-    m = re.search(r"(20\d{2})", t)
-    if m:
-        year = int(m.group(1))
-        t = t.replace(m.group(1), "").strip()
+    match_year = re.search(r"(20\d{2})", t)
+    if match_year:
+        year = int(match_year.group(1))
+        t = t.replace(match_year.group(1), "").strip()
 
     meses_map = {
         "enero": 1, "febrero": 2, "marzo": 3, "abril": 4,
@@ -72,7 +73,7 @@ def filtrar_y_resumir(text):
 
     period_label = f"{meses_inv(mes)} {year}" if mes else str(year)
 
-    # --- Comando: por mes
+    # Comando: por mes
     if text_orig.lower().startswith("por mes"):
         stats = {i: {"deals": 0, "amount": 0} for i in range(1, 13)}
         for r in rows:
@@ -86,7 +87,7 @@ def filtrar_y_resumir(text):
         lines = [f"• {meses_inv(m)}: {v['deals']} deals, ${v['amount']:,.0f}" for m, v in stats.items() if v["deals"] > 0]
         return f"📈 *Ventas por mes – {year}*\n" + "\n".join(lines)
 
-    # --- Comando: top ciudades
+    # Comando: top ciudades
     if "top ciudades" in text_orig.lower():
         data = []
         for r in rows:
@@ -110,7 +111,7 @@ def filtrar_y_resumir(text):
         lines = [f"{i + 1}. {c} — {info['deals']} deals, ${info['amount']:,.0f}" for i, (c, info) in enumerate(orden)]
         return f"🏙️ *Top ciudades por ventas – {period_label}*\n" + "\n".join(lines)
 
-    # --- Filtrado normal por fecha ---
+    # Filtrado base por fecha
     data = []
     for r in rows:
         try:
@@ -120,13 +121,13 @@ def filtrar_y_resumir(text):
         except:
             continue
 
-    # --- Comando: todos
+    # Comando: todos
     if t.strip() == "todos":
         reps = sorted(set(normalizar_nombre(r.get("Sales", "")) for r in data if r.get("Sales")))
         lines = [resumen_individual(data, rep) for rep in reps]
         return f"*📊 Ventas por responsable – {period_label}*\n\n" + "\n".join(lines)
 
-    # --- Comando: filtro por responsable
+    # Filtro por responsable
     if t:
         data = [r for r in data if t in normalizar(normalizar_nombre(r.get("Sales", "")))]
 
