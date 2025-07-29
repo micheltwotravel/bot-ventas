@@ -35,35 +35,18 @@ def filtrar_y_resumir(text):
     sheet = client.open(SHEET_NAME).worksheet(TAB_NAME)
     rows = sheet.get_all_records()
     
+    # Normalizar el texto de búsqueda
+    text_original = text
+    text = normalizar(text.strip()) if text else ""
+    
     # Año detectado
     year = datetime.now().year
-    month = None  # Por defecto, buscar en todos los meses
-    
-    # Buscar año en el texto
     year_match = re.search(r"(20\d{2})", text)
     if year_match:
         year = int(year_match.group(1))
         text = text.replace(year_match.group(1), "").strip()
     
-    # Buscar mes específico en el texto
-    meses = {
-        'enero': 1, 'febrero': 2, 'marzo': 3, 'abril': 4, 'mayo': 5, 'junio': 6,
-        'julio': 7, 'agosto': 8, 'septiembre': 9, 'octubre': 10, 'noviembre': 11, 'diciembre': 12
-    }
-    
-    for mes_nombre, mes_num in meses.items():
-        if mes_nombre in text.lower():
-            month = mes_num
-            text = text.lower().replace(mes_nombre, "").strip()
-            break
-    
-    # Si no se especifica mes, usar el actual
-    if month is None:
-        month = datetime.now().month
-    
-    text = normalizar(text)
-    
-    # Filtrar por mes y año
+    # Por simplicidad, buscar en TODOS los datos del año (sin filtrar por mes)
     data = []
     for r in rows:
         try:
@@ -71,52 +54,63 @@ def filtrar_y_resumir(text):
             if not date_str:
                 continue
             date_obj = parse(date_str)
-            if date_obj.year == year and date_obj.month == month:
+            if date_obj.year == year:
                 data.append(r)
         except:
             continue
     
-    # TEMPORAL: Si no hay datos en el mes actual, buscar en mayo (donde están tus datos)
-    if not data and month == datetime.now().month:
-        for r in rows:
-            try:
-                date_str = r.get("Date", "")
-                if not date_str:
-                    continue
-                date_obj = parse(date_str)
-                if date_obj.year == year and date_obj.month == 5:  # Mayo
-                    data.append(r)
-            except:
-                continue
-        month = 5  # Actualizar para el reporte
+    # DEBUG: Imprimir algunos datos para ver qué tenemos
+    debug_info = f"DEBUG - Total registros {year}: {len(data)}\n"
+    if data:
+        sales_unicos = set(r.get("Sales", "") for r in data if r.get("Sales"))
+        debug_info += f"Sales únicos: {list(sales_unicos)[:5]}\n"
     
     if text == "todos":
-        # Usar "Sales" para los responsables de ventas
         reps = sorted(set(r.get("Sales", "N/A") for r in data if r.get("Sales") and r.get("Sales").strip()))
         resumenes = [resumen_individual(data, rep) for rep in reps]
-        mes_nombre = list(meses.keys())[month-1] if month <= 12 else "mes"
-        return "*📊 Ventas por responsable - {} {}*\n\n{}".format(
-            mes_nombre.title(), year, "\n".join(resumenes)
-        )
+        resultado = "*📊 Ventas por responsable - {}*\n\n{}".format(year, "\n".join(resumenes))
+        return debug_info + "\n" + resultado
     
     if text:
-        # Mejorar la búsqueda - buscar coincidencias exactas o parciales
+        # Búsqueda MUY simple - solo buscar en Sales
         filtered_data = []
         for r in data:
-            sales_norm = normalizar(r.get("Sales", ""))
-            class_norm = normalizar(r.get("Class", ""))
-            posting_norm = normalizar(r.get("Posting", ""))
-            
-            # Coincidencia exacta o el texto está contenido en el campo
-            if (text == sales_norm or text in sales_norm or
-                text == class_norm or text in class_norm or
-                text == posting_norm or text in posting_norm):
+            sales_value = r.get("Sales", "")
+            if sales_value and text in normalizar(sales_value):
                 filtered_data.append(r)
-        
+                
         data = filtered_data
+        debug_info += f"Después de filtrar por '{text_original}': {len(data)} registros\n"
+        
+        if data:
+            debug_info += f"Primeros matches: {[r.get('Sales', 'N/A') for r in data[:3]]}\n"
     
     if not data:
-        return f"No se encontraron resultados para *{text or 'el periodo'}* en {year}."
+        return debug_info + f"\nNo se encontraron resultados para *{text_original}* en {year}."
+    
+    # Métricas generales
+    deals = len(data)
+    amount_total = sum(float(r.get("Amount", 0)) for r in data)
+    
+    reps = [r["Sales"] for r in data if r.get("Sales") and r.get("Sales").strip()]
+    ciudades = [r["Class"].split()[-1] for r in data if r.get("Class")]
+    canales = [r["Sales"] for r in data if r.get("Sales") and r.get("Sales").strip()]
+    
+    def top(lista): 
+        if not lista:
+            return "N/A"
+        from collections import Counter
+        counter = Counter(lista)
+        return counter.most_common(1)[0][0] if counter else "N/A"
+
+    resumen = f"""📊 *Resumen de ventas - {year}*
+• Deals: *{deals}*
+• Monto total estimado: *${amount_total:,.0f}*
+• Responsable top: *{top(reps)}*
+• Ciudad top: *{top(ciudades)}*
+• Canal top: *{top(canales)}*"""
+
+    return debug_info + "\n" + resumen
     
     # Métricas generales
     deals = len(data)
