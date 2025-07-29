@@ -7,6 +7,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 from dateutil.parser import parse
 import re
+import unicodedata
 
 load_dotenv()
 app = FastAPI()
@@ -20,7 +21,11 @@ SHEET_NAME = os.getenv("SHEET_NAME", "D6 Tracking")
 TAB_NAME = os.getenv("TAB_NAME", "Quickbooks")
 
 def normalizar(texto):
-    return re.sub(r'\s+', ' ', texto.strip().lower())
+    if not texto:
+        return ""
+    texto = texto.lower().strip()
+    texto = unicodedata.normalize('NFD', texto).encode('ascii', 'ignore').decode('utf-8')
+    return re.sub(r'\s+', ' ', texto)
 
 def resumen_individual(data, rep):
     data_rep = [r for r in data if normalizar(r.get("Sales", "")) == normalizar(rep)]
@@ -36,9 +41,8 @@ def filtrar_y_resumir(text):
     match = re.search(r"(20\d{2})", text)
     if match:
         year = int(match.group(1))
-        text = text.replace(match.group(1), "").strip().lower()
-    else:
-        text = text.strip().lower()
+        text = text.replace(match.group(1), "").strip()
+    texto_filtrado = normalizar(text)
 
     data = []
     for r in rows:
@@ -52,7 +56,7 @@ def filtrar_y_resumir(text):
         except:
             continue
 
-    if text == "todos":
+    if texto_filtrado == "todos":
         reps = sorted(set(r.get("Sales", "N/A") for r in data if r.get("Sales")))
         resumenes = [resumen_individual(data, rep) for rep in reps]
         return "*📊 Ventas por responsable - {} {}*\n\n{}".format(
@@ -60,12 +64,12 @@ def filtrar_y_resumir(text):
             "\n".join(resumenes)
         )
 
-    if text:
+    if texto_filtrado:
         data = [
             r for r in data if
-            text in normalizar(r.get("Sales", "")) or
-            text in normalizar(r.get("Class", "")) or
-            text in normalizar(r.get("Rep", ""))  # opcional
+            texto_filtrado in normalizar(r.get("Sales", "")) or
+            texto_filtrado in normalizar(r.get("Class", "")) or
+            texto_filtrado in normalizar(r.get("Rep", ""))
         ]
 
     if not data:
