@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Form, BackgroundTasks
+from fastapi.responses import Response
 from slack_sdk.webhook import WebhookClient
 from dotenv import load_dotenv
 import os
@@ -13,7 +14,7 @@ from collections import Counter
 load_dotenv()
 app = FastAPI()
 
-# Google Sheets
+# Google Sheets setup
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds = ServiceAccountCredentials.from_json_keyfile_name("/etc/secrets/google-credentials.json", scope)
 client = gspread.authorize(creds)
@@ -21,7 +22,6 @@ client = gspread.authorize(creds)
 SHEET_NAME = os.getenv("SHEET_NAME", "D6 Tracking")
 TAB_NAME = os.getenv("TAB_NAME", "Quickbooks")
 
-# Aliases para nombres equivalentes
 alias = {
     "sofia millan wedding": "sofia milan",
     "sofia millan": "sofia milan",
@@ -29,7 +29,6 @@ alias = {
     "sofia milan": "sofia milan",
 }
 
-# Utilidades
 def normalizar(texto):
     return ''.join(c for c in unicodedata.normalize('NFD', texto or "") if unicodedata.category(c) != 'Mn').lower().strip()
 
@@ -79,7 +78,44 @@ def filtrar_y_resumir(text):
             text = text.replace(m, "").strip()
             break
 
-    # Filtrar por fecha
+    # Comando: top ciudades
+    if "top ciudades" in text:
+        data_ciudades = []
+        for r in rows:
+            try:
+                date_str = r.get("Date", "")
+                if not date_str:
+                    continue
+                date_obj = parse(date_str)
+                if date_obj.year == year and (mes is None or date_obj.month == mes):
+                    r["__date"] = date_obj
+                    data_ciudades.append(r)
+            except:
+                continue
+
+        ciudades = {}
+        for r in data_ciudades:
+            ciudad = r.get("Class", "").split(":")[-1].strip()
+            if not ciudad:
+                continue
+            ciudades.setdefault(ciudad, {"deals": 0, "amount": 0})
+            ciudades[ciudad]["deals"] += 1
+            ciudades[ciudad]["amount"] += float(r.get("Amount", 0))
+
+        if not ciudades:
+            periodo = f"{meses_inv(mes)} {year}" if mes else str(year)
+            return f"No se encontraron ciudades con ventas en {periodo}."
+
+        top_ciudades = sorted(ciudades.items(), key=lambda x: x[1]["amount"], reverse=True)
+        lines = [
+            f"{i+1}. {c} — {v['deals']} deals, ${v['amount']:,.0f}"
+            for i, (c, v) in enumerate(top_ciudades)
+        ]
+
+        periodo = f"{meses_inv(mes)} {year}" if mes else str(year)
+        return f"🏙️ *Top ciudades por ventas - {periodo}*\n" + "\n".join(lines)
+
+    # Normal flow
     data = []
     for r in rows:
         try:
@@ -93,7 +129,6 @@ def filtrar_y_resumir(text):
         except:
             continue
 
-    # Agrupación por todos
     if text == "todos":
         reps_originales = [r.get("Sales", "N/A") for r in data if r.get("Sales")]
         reps_norm = sorted(set(normalizar_nombre(rep) for rep in reps_originales))
@@ -102,7 +137,6 @@ def filtrar_y_resumir(text):
         resultado = f"*📊 Ventas por responsable - {periodo}*\n\n" + "\n".join(resumenes)
         return resultado
 
-    # Filtro por responsable (si hay texto restante)
     if text:
         data = [r for r in data if text in normalizar(normalizar_nombre(r.get("Sales", "")))]
 
@@ -114,21 +148,22 @@ def filtrar_y_resumir(text):
     amount_total = sum(float(r.get("Amount", 0)) for r in data)
     reps = [normalizar_nombre(r["Sales"]) for r in data if r.get("Sales")]
     ciudades = [r["Class"].split(":")[-1].strip() for r in data if r.get("Class")]
-    canales = reps
 
     def top(lista): 
         return Counter(lista).most_common(1)[0][0].title() if lista else "N/A"
 
+    top_responsable = top(reps)
+    top_ciudad = top(ciudades)
     periodo = f"{meses_inv(mes)} {year}" if mes else str(year)
+
     resumen = f"""📊 *Resumen de ventas - {periodo}*
 • Deals: *{deals}*
 • Monto total estimado: *${amount_total:,.0f}*
-• Responsable top: *{top(reps)}*
-• Ciudad top: *{top(ciudades)}*
+• Responsable top: *{top_responsable}*
+• Ciudad top: *{top_ciudad}*"""
 
     return resumen
 
-# Asíncrono para evitar timeout
 def procesar_y_responder(response_url, text):
     resumen = filtrar_y_resumir(text)
     webhook = WebhookClient(response_url)
@@ -137,5 +172,4 @@ def procesar_y_responder(response_url, text):
 @app.post("/slack/ventas")
 async def ventas(background_tasks: BackgroundTasks, response_url: str = Form(...), text: str = Form("")):
     background_tasks.add_task(procesar_y_responder, response_url, text)
-    return {"response_type": "ephemeral", "text": "⏳ Procesando ventas..."}
-
+    return Response(status_code=200)
