@@ -8,6 +8,7 @@ from datetime import datetime
 from dateutil.parser import parse
 import unicodedata
 import re
+from collections import Counter
 
 load_dotenv()
 app = FastAPI()
@@ -31,8 +32,6 @@ def filtrar_y_resumir(text):
 
     # Año por defecto actual
     year = datetime.now().year
-
-    # Buscar si se menciona un año en el texto
     match = re.search(r"(20\d{2})", text)
     if match:
         year = int(match.group(1))
@@ -67,19 +66,29 @@ def filtrar_y_resumir(text):
     # Métricas
     deals = len(data)
     amount_total = sum(float(r.get("Amount", 0)) for r in data)
-    responsables = [r["Sales"] for r in data if r.get("Sales")]
-    ciudades = [r["Class"].split(":")[1] for r in data if "Class" in r and ":" in r["Class"]]
 
-    def top(lista):
-        return max(set(lista), key=lista.count) if lista else "N/A"
+    # Agrupar normalizados para contar, pero devolver nombre original más frecuente
+    def top_original(campo):
+        lista = [r[campo] for r in data if r.get(campo)]
+        normalizados = [normalizar(x) for x in lista]
+        if not normalizados:
+            return "N/A"
+        top_norm = Counter(normalizados).most_common(1)[0][0]
+        for x in lista:
+            if normalizar(x) == top_norm:
+                return x
+        return "N/A"
+
+    responsable_top = top_original("Sales")
+    ciudad_top = top_original("Class").split(":")[1] if ":" in top_original("Class") else top_original("Class")
 
     resumen = f"""
 📊 *Resumen de ventas - {datetime.now().strftime('%B %Y')}*
 
 • Deals: *{deals}*
 • Monto total estimado: *${amount_total:,.0f}*
-• Responsable top: *{top(responsables)}*
-• Ciudad top: *{top(ciudades)}*
+• Responsable top: *{responsable_top}*
+• Ciudad top: *{ciudad_top}*
 """.strip()
 
     return resumen
@@ -90,4 +99,3 @@ async def ventas(response_url: str = Form(...), text: str = Form("")):
     webhook = WebhookClient(response_url)
     webhook.send(text=resumen)
     return {"status": "ok"}
-
