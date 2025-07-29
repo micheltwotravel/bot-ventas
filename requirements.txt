@@ -4,3 +4,4 @@ python-dotenv
 slack-sdk
 gspread
 oauth2client
+python-multipart
