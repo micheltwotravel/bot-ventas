@@ -14,7 +14,7 @@ from collections import Counter
 load_dotenv()
 app = FastAPI()
 
-# Google Sheets
+# Google Sheets setup
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds = ServiceAccountCredentials.from_json_keyfile_name("/etc/secrets/google-credentials.json", scope)
 client = gspread.authorize(creds)
@@ -22,7 +22,6 @@ client = gspread.authorize(creds)
 SHEET_NAME = os.getenv("SHEET_NAME", "D6 Tracking")
 TAB_NAME = os.getenv("TAB_NAME", "Quickbooks")
 
-# Aliases para unificar nombres
 alias = {
     "sofia millan wedding": "sofia milan",
     "sofia millan": "sofia milan",
@@ -79,9 +78,9 @@ def filtrar_y_resumir(text):
             text = text.replace(m, "").strip()
             break
 
-    # 🏙️ Comando: top ciudades
+    # 🏙️ TOP CIUDADES
     if "top ciudades" in text_original.lower():
-        data_ciudades = []
+        data = []
         for r in rows:
             try:
                 date_str = r.get("Date", "")
@@ -89,13 +88,12 @@ def filtrar_y_resumir(text):
                     continue
                 date_obj = parse(date_str)
                 if date_obj.year == year and (mes is None or date_obj.month == mes):
-                    r["__date"] = date_obj
-                    data_ciudades.append(r)
+                    data.append(r)
             except:
                 continue
 
         ciudades = {}
-        for r in data_ciudades:
+        for r in data:
             ciudad = r.get("Class", "").split(":")[-1].strip()
             if not ciudad:
                 continue
@@ -125,7 +123,6 @@ def filtrar_y_resumir(text):
                 continue
             date_obj = parse(date_str)
             if date_obj.year == year and (mes is None or date_obj.month == mes):
-                r["__date"] = date_obj
                 data.append(r)
         except:
             continue
@@ -135,8 +132,7 @@ def filtrar_y_resumir(text):
         reps_norm = sorted(set(normalizar_nombre(rep) for rep in reps_originales))
         resumenes = [resumen_individual(data, rep) for rep in reps_norm]
         periodo = f"{meses_inv(mes)} {year}" if mes else str(year)
-        resultado = f"*📊 Ventas por responsable - {periodo}*\n\n" + "\n".join(resumenes)
-        return resultado
+        return f"*📊 Ventas por responsable - {periodo}*\n\n" + "\n".join(resumenes)
 
     if text:
         data = [r for r in data if text in normalizar(normalizar_nombre(r.get("Sales", "")))]
@@ -157,13 +153,11 @@ def filtrar_y_resumir(text):
     top_ciudad = top(ciudades)
     periodo = f"{meses_inv(mes)} {year}" if mes else str(year)
 
-    resumen = f"""📊 *Resumen de ventas - {periodo}*
+    return f"""📊 *Resumen de ventas - {periodo}*
 • Deals: *{deals}*
 • Monto total estimado: *${amount_total:,.0f}*
 • Responsable top: *{top_responsable}*
 • Ciudad top: *{top_ciudad}*"""
-
-    return resumen
 
 def procesar_y_responder(response_url, text):
     resumen = filtrar_y_resumir(text)
