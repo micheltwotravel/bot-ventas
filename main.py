@@ -7,6 +7,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 from dateutil.parser import parse
 import re
+import unicodedata
 
 load_dotenv()
 app = FastAPI()
@@ -19,8 +20,12 @@ client = gspread.authorize(creds)
 SHEET_NAME = os.getenv("SHEET_NAME", "D6 Tracking")
 TAB_NAME = os.getenv("TAB_NAME", "Quickbooks")
 
+# Normalizador para quitar tildes y bajar todo a minúscula
+def normalizar(texto):
+    return ''.join(c for c in unicodedata.normalize('NFD', texto) if unicodedata.category(c) != 'Mn').lower().strip()
+
 def resumen_individual(data, rep):
-    data_rep = [r for r in data if r.get("Sales", "").lower() == rep.lower()]
+    data_rep = [r for r in data if normalizar(r.get("Sales", "")) == normalizar(rep)]
     deals = len(data_rep)
     total = sum(float(r.get("Amount", 0)) for r in data_rep)
     return f"*{rep.title()}*: {deals} deals, ${total:,.0f}"
@@ -34,9 +39,8 @@ def filtrar_y_resumir(text):
     match = re.search(r"(20\d{2})", text)
     if match:
         year = int(match.group(1))
-        text = text.replace(match.group(1), "").strip().lower()
-    else:
-        text = text.strip().lower()
+        text = text.replace(match.group(1), "").strip()
+    text = normalizar(text)
 
     # Filtrar por fecha del año y mes actual
     data = []
@@ -60,13 +64,13 @@ def filtrar_y_resumir(text):
             "\n".join(resumenes)
         )
 
-    # Filtro por texto general (Sales, Class, Canal)
+    # Filtro general
     if text:
         data = [
             r for r in data if
-            text in str(r.get("Sales", "")).lower() or
-            text in str(r.get("Class", "")).lower() or
-            text in str(r.get("Posting", "")).lower()
+            text in normalizar(str(r.get("Sales", ""))) or
+            text in normalizar(str(r.get("Class", ""))) or
+            text in normalizar(str(r.get("Posting", "")))
         ]
 
     if not data:
