@@ -23,7 +23,6 @@ def filtrar_y_resumir(text):
     sheet = client.open(SHEET_NAME).worksheet(TAB_NAME)
     rows = sheet.get_all_records()
 
-    # Detectar año en el texto (si se menciona)
     year = datetime.now().year
     match = re.search(r"(20\d{2})", text)
     if match:
@@ -32,7 +31,6 @@ def filtrar_y_resumir(text):
     else:
         text = text.strip().lower()
 
-    # Filtrar por fecha (solo usando la columna 'Date')
     data = []
     for r in rows:
         try:
@@ -45,7 +43,6 @@ def filtrar_y_resumir(text):
         except Exception:
             continue
 
-    # Filtro opcional por texto libre (rep o ciudad)
     if text:
         data = [
             r for r in data if
@@ -56,7 +53,6 @@ def filtrar_y_resumir(text):
     if not data:
         return f"No se encontraron resultados para *{text or 'el mes'}* en {year}."
 
-    # Métricas
     deals = len(data)
     amount_total = sum(float(r.get("Amount", 0)) for r in data)
     reps = [r["Rep"] for r in data if r.get("Rep")]
@@ -72,7 +68,6 @@ def filtrar_y_resumir(text):
 • Responsable top: *{top(reps)}*
 • Ciudad top: *{top(ciudades)}*
 """.strip()
-
 
     return resumen
 
