@@ -23,6 +23,7 @@ def filtrar_y_resumir(text):
     sheet = client.open(SHEET_NAME).worksheet(TAB_NAME)
     rows = sheet.get_all_records()
 
+    # Detectar año si se menciona
     year = datetime.now().year
     match = re.search(r"(20\d{2})", text)
     if match:
@@ -31,6 +32,10 @@ def filtrar_y_resumir(text):
     else:
         text = text.strip().lower()
 
+    # Normalizar texto
+    text_norm = re.sub(r"\s+", " ", text.strip().lower())
+
+    # Filtrar por mes/año
     data = []
     for r in rows:
         try:
@@ -43,22 +48,25 @@ def filtrar_y_resumir(text):
         except Exception:
             continue
 
-    if text:
+    # Filtrar si hay texto (por rep o ciudad)
+    if text_norm:
         data = [
             r for r in data if
-            text in str(r.get("Rep", "")).lower() or
-            text in str(r.get("Class", "")).lower()
+            text_norm in re.sub(r"\s+", " ", str(r.get("Rep", "")).strip().lower()) or
+            text_norm in re.sub(r"\s+", " ", str(r.get("Class", "")).strip().lower())
         ]
 
     if not data:
         return f"No se encontraron resultados para *{text or 'el mes'}* en {year}."
 
+    # Métricas
     deals = len(data)
     amount_total = sum(float(r.get("Amount", 0)) for r in data)
     reps = [r["Rep"] for r in data if r.get("Rep")]
     ciudades = [r["Class"].split(":")[1] for r in data if "Class" in r and ":" in r["Class"]]
 
-    def top(lista): return max(set(lista), key=lista.count) if lista else "N/A"
+    def top(lista):
+        return max(set(lista), key=lista.count) if lista else "N/A"
 
     resumen = f"""
 📊 *Resumen de ventas - {datetime.now().strftime('%B %Y')}*
@@ -67,7 +75,7 @@ def filtrar_y_resumir(text):
 • Monto total estimado: *${amount_total:,.0f}*
 • Responsable top: *{top(reps)}*
 • Ciudad top: *{top(ciudades)}*
-""".strip()
+    """.strip()
 
     return resumen
 
