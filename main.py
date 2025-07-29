@@ -25,8 +25,8 @@ def normalizar(texto):
     return ''.join(c for c in unicodedata.normalize('NFD', texto or "") if unicodedata.category(c) != 'Mn').lower().strip()
 
 def resumen_individual(data, rep):
-    # Usar "Sales" para los responsables de ventas
-    data_rep = [r for r in data if normalizar(rep) in normalizar(r.get("Sales", ""))]
+    # Usar "Sales" para los responsables de ventas - búsqueda exacta normalizada
+    data_rep = [r for r in data if normalizar(r.get("Sales", "")) == normalizar(rep)]
     deals = len(data_rep)
     total = sum(float(r.get("Amount", 0)) for r in data_rep)
     return f"*{rep.title()}*: {deals} deals, ${total:,.0f}"
@@ -66,12 +66,20 @@ def filtrar_y_resumir(text):
         )
     
     if text:
-        data = [
-            r for r in data if
-            text in normalizar(r.get("Sales", "")) or  # Sales para responsables
-            text in normalizar(r.get("Class", "")) or
-            text in normalizar(r.get("Posting", ""))
-        ]
+        # Mejorar la búsqueda - buscar coincidencias exactas o parciales
+        filtered_data = []
+        for r in data:
+            sales_norm = normalizar(r.get("Sales", ""))
+            class_norm = normalizar(r.get("Class", ""))
+            posting_norm = normalizar(r.get("Posting", ""))
+            
+            # Coincidencia exacta o el texto está contenido en el campo
+            if (text == sales_norm or text in sales_norm or
+                text == class_norm or text in class_norm or
+                text == posting_norm or text in posting_norm):
+                filtered_data.append(r)
+        
+        data = filtered_data
     
     if not data:
         return f"No se encontraron resultados para *{text or 'el mes'}* en {year}."
