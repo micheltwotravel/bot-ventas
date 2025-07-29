@@ -33,7 +33,13 @@ def filtrar_y_resumir(text):
         text = text.strip().lower()
 
     # Filtrar por año actual
-    data = [r for r in rows if int(r.get("Year", 0)) == year and int(r.get("Month", 0)) == datetime.now().month]
+    data = [
+    r for r in rows
+    if r.get("Year", "").isdigit()
+    and r.get("Month", "").isdigit()
+    and int(r["Year"]) == year
+    and int(r["Month"]) == datetime.now().month
+]
 
     # Filtro opcional por texto
     if text:
