@@ -14,14 +14,14 @@ from collections import Counter
 load_dotenv()
 app = FastAPI()
 
-# Google Sheets setup
+# Google Sheets
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds = ServiceAccountCredentials.from_json_keyfile_name("/etc/secrets/google-credentials.json", scope)
 client = gspread.authorize(creds)
 SHEET_NAME = os.getenv("SHEET_NAME", "D6 Tracking")
 TAB_NAME = os.getenv("TAB_NAME", "Quickbooks")
 
-# Aliases para nombres unificados
+# Alias para unificar nombres
 alias = {
     "sofia millan wedding": "sofia milan",
     "sofía milan": "sofia milan",
@@ -36,8 +36,8 @@ def normalizar_nombre(nombre):
     return alias.get(n, n)
 
 def meses_inv(mes_num):
-    meses = ["", "enero", "febrero", "marzo", "abril", "mayo", "junio",
-             "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
+    meses = ["", "enero", "febrero", "marzo", "abril", "mayo", "junio", "julio",
+             "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
     return meses[mes_num].capitalize() if mes_num else ""
 
 def resumen_individual(data, rep):
