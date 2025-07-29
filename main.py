@@ -19,23 +19,21 @@ client = gspread.authorize(creds)
 SHEET_NAME = os.getenv("SHEET_NAME", "D6 Tracking")
 TAB_NAME = os.getenv("TAB_NAME", "Quickbooks")
 
-def normalizar(texto):
-    return re.sub(r"\s+", " ", str(texto).strip().lower())
-
 def filtrar_y_resumir(text):
     sheet = client.open(SHEET_NAME).worksheet(TAB_NAME)
     rows = sheet.get_all_records()
 
-    # Detectar año si se menciona
+    # Año por defecto actual
     year = datetime.now().year
+    # Buscar si se menciona un año en el texto
     match = re.search(r"(20\d{2})", text)
     if match:
         year = int(match.group(1))
-        text = text.replace(match.group(1), "").strip()
+        text = text.replace(match.group(1), "").strip().lower()
+    else:
+        text = text.strip().lower()
 
-    texto_filtrado = normalizar(text)
-
-    # Filtrar por mes/año actual
+    # Filtrar por mes actual y año
     data = []
     for r in rows:
         try:
@@ -48,12 +46,12 @@ def filtrar_y_resumir(text):
         except:
             continue
 
-    # Filtro por rep o ciudad
-    if texto_filtrado:
+    # Filtro por texto libre (responsable o ciudad)
+    if text:
         data = [
             r for r in data if
-            texto_filtrado in normalizar(r.get("Rep", "")) or
-            texto_filtrado in normalizar(r.get("Class", ""))
+            text in str(r.get("Sales", "")).lower() or
+            text in str(r.get("Class", "")).lower()
         ]
 
     if not data:
@@ -62,19 +60,20 @@ def filtrar_y_resumir(text):
     # Métricas
     deals = len(data)
     amount_total = sum(float(r.get("Amount", 0)) for r in data)
-    reps = [r["Rep"].strip() for r in data if r.get("Rep")]
-    ciudades = [r["Class"].split(":")[1].strip() for r in data if "Class" in r and ":" in r["Class"]]
+    responsables = [r["Sales"] for r in data if r.get("Sales")]
+    ciudades = [r["Class"].split(":")[1] for r in data if "Class" in r and ":" in r["Class"]]
 
-    def top(lista): return max(set(lista), key=lista.count) if lista else "N/A"
+    def top(lista):
+        return max(set(lista), key=lista.count) if lista else "N/A"
 
     resumen = f"""
 📊 *Resumen de ventas - {datetime.now().strftime('%B %Y')}*
 
 • Deals: *{deals}*
 • Monto total estimado: *${amount_total:,.0f}*
-• Responsable top: *{top(reps)}*
+• Responsable top: *{top(responsables)}*
 • Ciudad top: *{top(ciudades)}*
-    """.strip()
+""".strip()
 
     return resumen
 
@@ -84,4 +83,3 @@ async def ventas(response_url: str = Form(...), text: str = Form("")):
     webhook = WebhookClient(response_url)
     webhook.send(text=resumen)
     return {"status": "ok"}
-
