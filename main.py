@@ -60,9 +60,9 @@ def filtrar_y_resumir(text):
     # Métricas
     deals = len(data)
     amount_total = sum(float(r.get("Amount", 0)) for r in data)
-    reps = [r["Rep"] for r in data if r["Rep"]]
+    reps = [r["Rep"] for r in data if r.get("Rep")]
     ciudades = [r["Class"].split(":")[1] for r in data if "Class" in r and ":" in r["Class"]]
-    canales = [r["Sales"] for r in data if r["Sales"]]
+    canales = [r["Sales"] for r in data if r.get("Sales")]
 
     def top(lista): return max(set(lista), key=lista.count) if lista else "N/A"
 
@@ -84,3 +84,4 @@ async def ventas(response_url: str = Form(...), text: str = Form("")):
     webhook = WebhookClient(response_url)
     webhook.send(text=resumen)
     return {"status": "ok"}
+
