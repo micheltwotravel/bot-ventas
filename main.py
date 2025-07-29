@@ -19,6 +19,9 @@ client = gspread.authorize(creds)
 SHEET_NAME = os.getenv("SHEET_NAME", "D6 Tracking")
 TAB_NAME = os.getenv("TAB_NAME", "Quickbooks")
 
+def normalizar(texto):
+    return re.sub(r"\s+", " ", str(texto).strip().lower())
+
 def filtrar_y_resumir(text):
     sheet = client.open(SHEET_NAME).worksheet(TAB_NAME)
     rows = sheet.get_all_records()
@@ -28,14 +31,11 @@ def filtrar_y_resumir(text):
     match = re.search(r"(20\d{2})", text)
     if match:
         year = int(match.group(1))
-        text = text.replace(match.group(1), "").strip().lower()
-    else:
-        text = text.strip().lower()
+        text = text.replace(match.group(1), "").strip()
 
-    # Normalizar texto
-    text_norm = re.sub(r"\s+", " ", text.strip().lower())
+    texto_filtrado = normalizar(text)
 
-    # Filtrar por mes/año
+    # Filtrar por mes/año actual
     data = []
     for r in rows:
         try:
@@ -45,15 +45,15 @@ def filtrar_y_resumir(text):
             date_obj = parse(date_str)
             if date_obj.year == year and date_obj.month == datetime.now().month:
                 data.append(r)
-        except Exception:
+        except:
             continue
 
-    # Filtrar si hay texto (por rep o ciudad)
-    if text_norm:
+    # Filtro por rep o ciudad
+    if texto_filtrado:
         data = [
             r for r in data if
-            text_norm in re.sub(r"\s+", " ", str(r.get("Rep", "")).strip().lower()) or
-            text_norm in re.sub(r"\s+", " ", str(r.get("Class", "")).strip().lower())
+            texto_filtrado in normalizar(r.get("Rep", "")) or
+            texto_filtrado in normalizar(r.get("Class", ""))
         ]
 
     if not data:
@@ -62,11 +62,10 @@ def filtrar_y_resumir(text):
     # Métricas
     deals = len(data)
     amount_total = sum(float(r.get("Amount", 0)) for r in data)
-    reps = [r["Rep"] for r in data if r.get("Rep")]
-    ciudades = [r["Class"].split(":")[1] for r in data if "Class" in r and ":" in r["Class"]]
+    reps = [r["Rep"].strip() for r in data if r.get("Rep")]
+    ciudades = [r["Class"].split(":")[1].strip() for r in data if "Class" in r and ":" in r["Class"]]
 
-    def top(lista):
-        return max(set(lista), key=lista.count) if lista else "N/A"
+    def top(lista): return max(set(lista), key=lista.count) if lista else "N/A"
 
     resumen = f"""
 📊 *Resumen de ventas - {datetime.now().strftime('%B %Y')}*
@@ -85,3 +84,4 @@ async def ventas(response_url: str = Form(...), text: str = Form("")):
     webhook = WebhookClient(response_url)
     webhook.send(text=resumen)
     return {"status": "ok"}
+
