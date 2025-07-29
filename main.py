@@ -125,7 +125,6 @@ def filtrar_y_resumir(text):
 • Monto total estimado: *${amount_total:,.0f}*
 • Responsable top: *{top(reps)}*
 • Ciudad top: *{top(ciudades)}*
-• Canal top: *{top(canales)}*"""
 
     return resumen
 
