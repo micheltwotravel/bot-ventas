@@ -21,7 +21,7 @@ client = gspread.authorize(creds)
 SHEET_NAME = os.getenv("SHEET_NAME", "D6 Tracking")
 TAB_NAME = os.getenv("TAB_NAME", "Quickbooks")
 
-# Alias para unificar nombres
+# Alias
 alias = {
     "sofia millan wedding": "sofia milan",
     "sofía milan": "sofia milan",
@@ -73,7 +73,7 @@ def filtrar_y_resumir(text):
 
     period_label = f"{meses_inv(mes)} {year}" if mes else str(year)
 
-    # Comando: por mes
+    # 📈 Ventas por mes
     if text_orig.lower().startswith("por mes"):
         stats = {i: {"deals": 0, "amount": 0} for i in range(1, 13)}
         for r in rows:
@@ -87,7 +87,7 @@ def filtrar_y_resumir(text):
         lines = [f"• {meses_inv(m)}: {v['deals']} deals, ${v['amount']:,.0f}" for m, v in stats.items() if v["deals"] > 0]
         return f"📈 *Ventas por mes – {year}*\n" + "\n".join(lines)
 
-    # Comando: top ciudades
+    # 🏙️ Top ciudades
     if "top ciudades" in text_orig.lower():
         data = []
         for r in rows:
@@ -111,7 +111,33 @@ def filtrar_y_resumir(text):
         lines = [f"{i + 1}. {c} — {info['deals']} deals, ${info['amount']:,.0f}" for i, (c, info) in enumerate(orden)]
         return f"🏙️ *Top ciudades por ventas – {period_label}*\n" + "\n".join(lines)
 
-    # Filtrado base por fecha
+    # ✅ Filtro combinado por responsable y mes
+    if mes and t and "por mes" not in text_orig.lower() and "top ciudades" not in text_orig.lower():
+        data = []
+        for r in rows:
+            try:
+                d = parse(r.get("Date", ""))
+                if d.year == year and d.month == mes and t in normalizar(normalizar_nombre(r.get("Sales", ""))):
+                    data.append(r)
+            except:
+                continue
+        if data:
+            deals = len(data)
+            total = sum(float(r.get("Amount", 0)) for r in data)
+            reps = [normalizar_nombre(r.get("Sales", "")) for r in data if r.get("Sales")]
+            ciudades = [r.get("Class", "").split(":")[-1].strip() for r in data if r.get("Class")]
+            top_rep = Counter(reps).most_common(1)[0][0].title() if reps else "N/A"
+            top_ciudad = Counter(ciudades).most_common(1)[0][0].title() if ciudades else "N/A"
+
+            return (
+                f"📊 *Resumen de ventas – {period_label}*\n"
+                f"• Deals: *{deals}*\n"
+                f"• Monto total estimado: *${total:,.0f}*\n"
+                f"• Responsable top: *{top_rep}*\n"
+                f"• Ciudad top: *{top_ciudad}*"
+            )
+
+    # Filtrado base
     data = []
     for r in rows:
         try:
@@ -121,13 +147,13 @@ def filtrar_y_resumir(text):
         except:
             continue
 
-    # Comando: todos
+    # todos
     if t.strip() == "todos":
         reps = sorted(set(normalizar_nombre(r.get("Sales", "")) for r in data if r.get("Sales")))
         lines = [resumen_individual(data, rep) for rep in reps]
         return f"*📊 Ventas por responsable – {period_label}*\n\n" + "\n".join(lines)
 
-    # Filtro por responsable
+    # Filtrado por responsable
     if t:
         data = [r for r in data if t in normalizar(normalizar_nombre(r.get("Sales", "")))]
 
