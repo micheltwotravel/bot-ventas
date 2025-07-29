@@ -20,12 +20,12 @@ client = gspread.authorize(creds)
 SHEET_NAME = os.getenv("SHEET_NAME", "D6 Tracking")
 TAB_NAME = os.getenv("TAB_NAME", "Quickbooks")
 
-# Normalizador para quitar tildes y bajar todo a minúscula
+# Normalizador para quitar tildes y bajar a minúscula
 def normalizar(texto):
-    return ''.join(c for c in unicodedata.normalize('NFD', texto) if unicodedata.category(c) != 'Mn').lower().strip()
+    return ''.join(c for c in unicodedata.normalize('NFD', texto or "") if unicodedata.category(c) != 'Mn').lower().strip()
 
 def resumen_individual(data, rep):
-    data_rep = [r for r in data if normalizar(r.get("Sales", "")) == normalizar(rep)]
+    data_rep = [r for r in data if normalizar(rep) in normalizar(r.get("Sales", ""))]
     deals = len(data_rep)
     total = sum(float(r.get("Amount", 0)) for r in data_rep)
     return f"*{rep.title()}*: {deals} deals, ${total:,.0f}"
@@ -34,7 +34,7 @@ def filtrar_y_resumir(text):
     sheet = client.open(SHEET_NAME).worksheet(TAB_NAME)
     rows = sheet.get_all_records()
 
-    # Año detectado opcional
+    # Año detectado
     year = datetime.now().year
     match = re.search(r"(20\d{2})", text)
     if match:
@@ -42,7 +42,7 @@ def filtrar_y_resumir(text):
         text = text.replace(match.group(1), "").strip()
     text = normalizar(text)
 
-    # Filtrar por fecha del año y mes actual
+    # Filtrar por mes y año actual
     data = []
     for r in rows:
         try:
@@ -55,22 +55,19 @@ def filtrar_y_resumir(text):
         except:
             continue
 
-    # Si escribieron "todos", mostrar por cada vendedor
     if text == "todos":
         reps = sorted(set(r.get("Sales", "N/A") for r in data if r.get("Sales")))
         resumenes = [resumen_individual(data, rep) for rep in reps]
         return "*📊 Ventas por responsable - {} {}*\n\n{}".format(
-            datetime.now().strftime("%B"), year,
-            "\n".join(resumenes)
+            datetime.now().strftime("%B"), year, "\n".join(resumenes)
         )
 
-    # Filtro general
     if text:
         data = [
             r for r in data if
-            text in normalizar(str(r.get("Sales", ""))) or
-            text in normalizar(str(r.get("Class", ""))) or
-            text in normalizar(str(r.get("Posting", "")))
+            text in normalizar(r.get("Sales", "")) or
+            text in normalizar(r.get("Class", "")) or
+            text in normalizar(r.get("Posting", ""))
         ]
 
     if not data:
@@ -103,4 +100,3 @@ async def ventas(response_url: str = Form(...), text: str = Form("")):
     webhook = WebhookClient(response_url)
     webhook.send(text=resumen)
     return {"status": "ok"}
-
