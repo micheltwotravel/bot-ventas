@@ -5,6 +5,7 @@ import os
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
+from dateutil.parser import parse
 import re
 
 load_dotenv()
@@ -31,15 +32,25 @@ def filtrar_y_resumir(text):
     else:
         text = text.strip().lower()
 
-    # Filtrar por año actual y mes actual con verificación de campos válidos
-    data = [
-        r for r in rows
-        if r.get("Year", "").isdigit() and r.get("Month", "").isdigit()
-        and int(r["Year"]) == year
-        and int(r["Month"]) == datetime.now().month
-    ]
+    # Obtener año y mes desde la columna "Date"
+    def get_year_month(record):
+        try:
+            date_str = record.get("Date")
+            if not date_str:
+                return None, None
+            dt = parse(date_str)
+            return dt.year, dt.month
+        except:
+            return None, None
 
-    # Filtro opcional por texto (persona, canal, ciudad)
+    # Filtrar por año y mes actual
+    data = []
+    for r in rows:
+        r_year, r_month = get_year_month(r)
+        if r_year == year and r_month == datetime.now().month:
+            data.append(r)
+
+    # Filtro opcional por texto
     if text:
         data = [
             r for r in data if
@@ -53,12 +64,13 @@ def filtrar_y_resumir(text):
 
     # Métricas
     deals = len(data)
-    amount_total = sum(float(r.get("Amount", 0)) for r in data if r.get("Amount"))
-    reps = [r["Rep"] for r in data if r.get("Rep")]
+    amount_total = sum(float(r.get("Amount", 0)) for r in data if str(r.get("Amount", "")).replace(".", "").replace(",", "").isdigit())
+    reps = [r.get("Rep", "") for r in data if r.get("Rep")]
     ciudades = [r["Class"].split(":")[1] for r in data if "Class" in r and ":" in r["Class"]]
-    canales = [r["Sales"] for r in data if r.get("Sales")]
+    canales = [r.get("Sales", "") for r in data if r.get("Sales")]
 
-    def top(lista): return max(set(lista), key=lista.count) if lista else "N/A"
+    def top(lista):
+        return max(set(lista), key=lista.count) if lista else "N/A"
 
     resumen = f"""
 📊 *Resumen de ventas - {datetime.now().strftime('%B %Y')}*
@@ -74,8 +86,13 @@ def filtrar_y_resumir(text):
 
 @app.post("/slack/ventas")
 async def ventas(response_url: str = Form(...), text: str = Form("")):
-    resumen = filtrar_y_resumir(text)
-    webhook = WebhookClient(response_url)
-    webhook.send(text=resumen)
-    return {"ok": True}
-
+    try:
+        resumen = filtrar_y_resumir(text)
+        webhook = WebhookClient(response_url)
+        webhook.send(text=resumen)
+        return {"ok": True}
+    except Exception as e:
+        print(f"Error: {e}")
+        webhook = WebhookClient(response_url)
+        webhook.send(text="⚠️ Ocurrió un error procesando la solicitud.")
+        return {"ok": False, "error": str(e)}
