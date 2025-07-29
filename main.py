@@ -8,11 +8,12 @@ from datetime import datetime
 from dateutil.parser import parse
 import re
 import unicodedata
+from collections import Counter
 
 load_dotenv()
 app = FastAPI()
 
-# Google Sheets setup
+# Google Sheets
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds = ServiceAccountCredentials.from_json_keyfile_name("/etc/secrets/google-credentials.json", scope)
 client = gspread.authorize(creds)
@@ -50,47 +51,32 @@ def filtrar_y_resumir(text):
                 continue
             date_obj = parse(date_str)
             if date_obj.year == year:
+                r["__date"] = date_obj  # opcional para usar luego
                 data.append(r)
         except:
             continue
-
-    debug_info = f"DEBUG - Total registros {year}: {len(data)}\n"
 
     if text == "todos":
         reps = sorted(set(r.get("Sales", "N/A") for r in data if r.get("Sales") and r.get("Sales").strip()))
         resumenes = [resumen_individual(data, rep) for rep in reps]
         resultado = "*📊 Ventas por responsable - {}*\n\n{}".format(year, "\n".join(resumenes))
-        return debug_info + "\n" + resultado
+        return resultado
 
     if text:
-        filtered_data = []
-        for r in data:
-            sales_value = r.get("Sales", "")
-            if sales_value and text in normalizar(sales_value):
-                filtered_data.append(r)
-
-        data = filtered_data
-        debug_info += f"Después de filtrar por '{text_original}': {len(data)} registros\n"
-        
-        if data:
-            debug_info += f"Primeros matches: {[r.get('Sales', 'N/A') for r in data[:3]]}\n"
+        data = [r for r in data if text in normalizar(r.get("Sales", ""))]
 
     if not data:
-        return debug_info + f"\nNo se encontraron resultados para *{text_original}* en {year}."
+        return f"No se encontraron resultados para *{text_original}* en {year}."
 
     deals = len(data)
     amount_total = sum(float(r.get("Amount", 0)) for r in data)
 
-    reps = [r["Sales"] for r in data if r.get("Sales") and r.get("Sales").strip()]
-    ciudades = [r["Class"].split()[-1] for r in data if r.get("Class")]
-    canales = [r["Sales"] for r in data if r.get("Sales") and r.get("Sales").strip()]
+    reps = [r["Sales"] for r in data if r.get("Sales")]
+    ciudades = [r["Class"].split(":")[-1].strip() for r in data if r.get("Class")]
+    canales = [r["Sales"] for r in data if r.get("Sales")]
 
     def top(lista): 
-        if not lista:
-            return "N/A"
-        from collections import Counter
-        counter = Counter(lista)
-        return counter.most_common(1)[0][0] if counter else "N/A"
+        return Counter(lista).most_common(1)[0][0] if lista else "N/A"
 
     resumen = f"""📊 *Resumen de ventas - {year}*
 • Deals: *{deals}*
@@ -99,9 +85,8 @@ def filtrar_y_resumir(text):
 • Ciudad top: *{top(ciudades)}*
 • Canal top: *{top(canales)}*"""
 
-    return debug_info + "\n" + resumen
+    return resumen
 
-# Ejecutar en segundo plano para evitar timeout
 def procesar_y_responder(response_url, text):
     resumen = filtrar_y_resumir(text)
     webhook = WebhookClient(response_url)
