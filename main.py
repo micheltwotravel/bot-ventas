@@ -24,7 +24,7 @@ def wa_send_text(to: str, body: str):
     phone_id = (WA_PHONE_ID or "").strip()
     url = f"https://graph.facebook.com/v23.0/{phone_id}/messages"
     headers = {
-        "Authorization": f"Bearer {WA_TOKEN}",
+        "Authorization": f"Bearer {(WA_TOKEN or '').strip()}",
         "Content-Type": "application/json",
     }
     payload = {
@@ -40,6 +40,22 @@ def wa_send_text(to: str, body: str):
     if r.status_code == 400:
         print(f"⚠️ BAD REQUEST. phone_id={repr(phone_id)}")
     return r.status_code
+
+def extract_text(m: dict) -> str:
+    t = (m.get("type") or "").lower()
+    if t == "text":
+        return ((m.get("text") or {}).get("body") or "").strip()
+    if t == "button":
+        return ((m.get("button") or {}).get("text") or "").strip()
+    if t == "interactive":
+        inter = m.get("interactive") or {}
+        if inter.get("type") == "button_reply":
+            return ((inter.get("button_reply") or {}).get("title") or "").strip()
+        if inter.get("type") == "list_reply":
+            return ((inter.get("list_reply") or {}).get("title") or "").strip()
+    return ""  # sticker/imagen/audio/etc.
+
+
 
 # ====== Helpers HubSpot ======
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -121,7 +137,7 @@ def find_top(service: str, city: str, pax: int, prefs: str, top_k: int = TOP_K):
     rows = load_catalog()
     if not rows:
         return []
-
+        
     def row_ok(r):
         if (r.get("service_type","").lower() != service):
             return False
@@ -148,8 +164,7 @@ def find_top(service: str, city: str, pax: int, prefs: str, top_k: int = TOP_K):
             return 999999.0
 
     filtered.sort(key=price_val)
-    k = max(1, int(top_k or 1))
-    return filtered[:k]
+    return filtered[:max(1, int(top_k or 1))]
 
 # ====== Mensajes y helpers de copy (bilingüe) ======
 def is_es(lang: str) -> bool:
@@ -218,10 +233,11 @@ def r_concierge(lang):    return ("Servicio 100% personalizado. *Desde* USD esti
 def reply_topN(lang: str, items: list, unit: str = "noche"):
     if not items:
         return ("No veo opciones con esos filtros. ¿Quieres que intente con *fechas cercanas (±3 días)* o ajustar el *tamaño del grupo*?"
-                if is_es(lang) else
+                if (lang or "ES").upper().startswith("ES") else
                 "I couldn’t find matches. Try *nearby dates (±3 days)* or adjust *party size*?")
+    es = (lang or "ES").upper().startswith("ES")
     lines = []
-    if is_es(lang):
+    if es:
         lines.append(f"Estas son nuestras mejores {len(items)} opción(es) (precios *desde*):")
         for r in items:
             lines.append(f"• {r.get('name')} ({r.get('capacity_max','?')} pax) — USD {r.get('price_from_usd','?')}/{unit} → {r.get('url')}")
@@ -229,9 +245,11 @@ def reply_topN(lang: str, items: list, unit: str = "noche"):
     else:
         lines.append(f"Here are the top {len(items)} option(s) (*prices from*):")
         for r in items:
-            lines.append(f"• {r.get('name')} ({r.get('capacity_max','?')} guests) — USD {r.get('price_from_usd','?')}/night → {r.get('url')}")
+            # 👇 usa unit también en EN
+            lines.append(f"• {r.get('name')} ({r.get('capacity_max','?')} guests) — USD {r.get('price_from_usd','?')}/{unit} → {r.get('url')}")
         lines.append("Final *availability* is confirmed by our *sales* team before booking. Connect with sales?")
     return "\n".join(lines)
+
 
 def add_another_or_sales(lang: str):
     return ("¿Quieres *cotizar otro servicio* además de este?\n• *Añadir otro servicio*  \n• *Conectar con ventas*"
@@ -244,19 +262,23 @@ def handoff_client(lang: str, owner_name: str, team: str):
             f"Connecting you with [{owner_name} – Sales {team}] to confirm *availability* and finalize the *booking*.")
 
 # ====== Extracción de texto y validaciones ======
-def extract_text(m: dict) -> str:
-    t = (m.get("type") or "").lower()
-    if t == "text":
-        return ((m.get("text") or {}).get("body") or "").strip()
-    if t == "button":
-        return ((m.get("button") or {}).get("text") or "").strip()
-    if t == "interactive":
-        inter = m.get("interactive") or {}
-        if inter.get("type") == "button_reply":
-            return ((inter.get("button_reply") or {}).get("title") or "").strip()
-        if inter.get("type") == "list_reply":
-            return ((inter.get("list_reply") or {}).get("title") or "").strip()
-    return ""  # sticker/imagen/audio/etc.
+
+def ask_contact(lang: str):
+    return (
+        "Para enviarte opciones y una cotización personalizada, necesito tus datos:\n"
+        " 📛 *Nombre completo:*\n"
+        " _(Luego te pido el correo)_"
+        if is_es(lang)
+        else
+        "To share options and a personalized quote, I’ll need your details:\n"
+        " 📛 *Full name:*\n"
+        " _(I’ll ask your email next)_"
+    )
+
+
+def ask_email(lang: str):
+    return "📧 *Correo electrónico:*" if is_es(lang) else "📧 *Email address:*"
+
 
 def valid_name(fullname: str) -> bool:
     return len((fullname or "").split()) >= 2
@@ -316,7 +338,7 @@ async def incoming(req: Request):
                         wa_send_text(user, opener_bi())
                         continue
                     state["step"] = "contact_name"
-                    wa_send_text(user, contact_capture(state["lang"]))
+                    wa_send_text(user, ask_contact(state["lang"]))
                     continue
 
                 # 1) Captura nombre
