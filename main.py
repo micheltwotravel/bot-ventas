@@ -114,7 +114,6 @@ def load_catalog():
     return rows
 
 def extract_pax(text: str) -> int:
-    """Detecta 'somos 5', '5 personas', 'para 8', etc."""
     if not text:
         return 0
     m = re.search(r'(\d{1,3})\s*(pax|persona|personas|guest|guests)?', text.lower())
@@ -124,11 +123,6 @@ def extract_pax(text: str) -> int:
         return 0
 
 def find_top_relaxed(service: str, city: str, pax: int, prefs: str, top_k: int = TOP_K):
-    """
-    Filtros con relajación:
-    1) service+city+pax+prefs -> 2) service+city+pax -> 3) service+city
-    4) service -> 5) city -> 6) cualquiera
-    """
     rows = load_catalog()
     if not rows:
         return []
@@ -235,10 +229,9 @@ def city_list(lang):
 
 def ask_date(lang):
     return ("¿En qué fecha será tu viaje/estancia? Formato *YYYY-MM-DD*.\n\n"
-            "Si prefieres, puedes usar los botones."
-            if is_es(lang) else
+            "O usa los botones:" if is_es(lang) else
             "When will your trip/stay be? Use *YYYY-MM-DD* format.\n\n"
-            "Or use the buttons below.")
+            "Or use the buttons:")
 
 def date_buttons(lang):
     return [
@@ -304,7 +297,6 @@ def hubspot_find_or_create_contact(name: str, email: str, phone: str, lang: str)
     base = "https://api.hubapi.com/crm/v3/objects/contacts"
     headers = {"Authorization": f"Bearer {HUBSPOT_TOKEN}", "Content-Type": "application/json"}
 
-    # if email provided, search
     cid = None
     if email:
         s = requests.post(f"{base}/search", headers=headers, json={
@@ -330,7 +322,6 @@ def hubspot_find_or_create_contact(name: str, email: str, phone: str, lang: str)
         print("HubSpot contact update:", up.status_code, up.text[:150])
         return cid if up.ok else None
 
-    # create
     r = requests.post(base, headers=headers, json={"properties": props}, timeout=20)
     if r.status_code == 201:
         cid = r.json().get("id")
@@ -341,39 +332,31 @@ def hubspot_find_or_create_contact(name: str, email: str, phone: str, lang: str)
 
 def owner_for_city(city: str):
     c = (city or "").strip().lower()
-    # mapeo por ciudad
     if c in ("cartagena","ctg","tulum"):
         return ("Sofía", HUBSPOT_OWNER_SOFIA or None, CAL_SOFIA, "Cartagena/Tulum")
     if c in ("medellin","medellín"):
         return ("Ross", HUBSPOT_OWNER_ROSS or None, CAL_ROSS, "Medellín")
     if c in ("mexico","méxico","cdmx"):
         return ("Ray", HUBSPOT_OWNER_RAY or None, CAL_RAY, "CDMX")
-    # default
     return ("Two Travel Team", None, CAL_SOFIA, city or "—")
 
-def hubspot_create_deal(contact_id: str, owner_id: str|None, title: str, desc: str):
+def hubspot_create_deal(contact_id, owner_id, title, desc):
     if not HUBSPOT_TOKEN:
         print("WARN: HUBSPOT_TOKEN missing")
         return None
     headers = {"Authorization": f"Bearer {HUBSPOT_TOKEN}", "Content-Type": "application/json"}
     base = "https://api.hubapi.com/crm/v3/objects/deals"
-    props = {
-        "dealname": title,
-        "description": desc,
-        "pipeline": HUBSPOT_PIPELINE_ID or None,
-        "dealstage": HUBSPOT_DEALSTAGE_ID or None,
-    }
-    if owner_id:
-        props["hubspot_owner_id"] = owner_id
+    props = {"dealname": title, "description": desc}
+    if HUBSPOT_PIPELINE_ID:  props["pipeline"]  = HUBSPOT_PIPELINE_ID
+    if HUBSPOT_DEALSTAGE_ID: props["dealstage"] = HUBSPOT_DEALSTAGE_ID
+    if owner_id:             props["hubspot_owner_id"] = owner_id
     r = requests.post(base, headers=headers, json={"properties": props}, timeout=20)
     if not r.ok:
         print("HubSpot deal error:", r.status_code, r.text[:200])
         return None
     deal_id = r.json().get("id")
-    # associate contact
     try:
         assoc_url = f"https://api.hubapi.com/crm/v4/objects/deals/{deal_id}/associations/contacts/{contact_id}"
-        # associationTypeId=3 is common for deal<->contact, but v4 infers by endpoint
         a = requests.put(assoc_url, headers=headers, json=[{"associationCategory":"HUBSPOT_DEFINED","associationTypeId": 3}], timeout=20)
         print("Deal association:", a.status_code, a.text[:120])
     except Exception as e:
@@ -439,7 +422,6 @@ async def incoming(req: Request):
     for entry in data.get("entry", []):
         for change in entry.get("changes", []):
             value = change.get("value", {})
-            # ignora statuses (sent/delivered/read)
             if value.get("statuses"):
                 continue
 
@@ -448,11 +430,18 @@ async def incoming(req: Request):
                 if not user:
                     continue
 
-                # Primera vez → bienvenida + elección idioma (botones)
+                # ===== Reinicio manual (hola/start/inicio/menu) =====
+                txt_raw = ((m.get("text") or {}).get("body") or "").strip().lower()
+                if txt_raw in ("hola","hello","/start","start","inicio","menu"):
+                    SESSIONS[user] = {"step":"lang","lang":"ES","attempts_email":0}
+                    # 👇 Welcome como mensaje interactivo (NO texto aparte)
+                    wa_send_buttons(user, welcome_text(), opener_buttons())
+                    continue
+
+                # ===== Primera vez → Welcome con botones idioma =====
                 if user not in SESSIONS:
                     SESSIONS[user] = {"step":"lang","lang":"ES","attempts_email":0}
-                    wa_send_text(user, welcome_text())
-                    wa_send_buttons(user, " ", opener_buttons())
+                    wa_send_buttons(user, welcome_text(), opener_buttons())
                     continue
 
                 text, reply_id = extract_text_or_reply(m)
@@ -467,8 +456,7 @@ async def incoming(req: Request):
                     elif rid == "LANG_EN" or low in ("en","english"):
                         state["lang"] = "EN"
                     else:
-                        wa_send_text(user, welcome_text())
-                        wa_send_buttons(user, " ", opener_buttons())
+                        wa_send_buttons(user, welcome_text(), opener_buttons())
                         continue
                     state["step"] = "contact_name"
                     wa_send_text(user, ask_fullname(state["lang"]))
@@ -500,7 +488,6 @@ async def incoming(req: Request):
                     else:
                         state["attempts_email"] = state.get("attempts_email",0) + 1
                         if state["attempts_email"] >= 2:
-                            # seguimos igual, guardamos lo que puso
                             state["email"] = (text or "").strip()
                             state["contact_id"] = hubspot_find_or_create_contact(
                                 state.get("name"), state.get("email"), user, state.get("lang")
@@ -525,24 +512,15 @@ async def incoming(req: Request):
                             "SVC_TEAM":"team",
                         }[rid]
                         state["service_type"] = svc
+                        h,b,btn,rows = city_list(state["lang"])
                         if svc in ("villas","boats"):
-                            # pedir ciudad con lista
-                            h,b,btn,rows = city_list(state["lang"])
-                            wa_send_list(user, h, b, btn, rows)
-                            state["step"] = "ask_city"
+                            wa_send_list(user, h, b, btn, rows); state["step"] = "ask_city"
                         elif svc == "weddings":
-                            h,b,btn,rows = city_list(state["lang"])
-                            wa_send_list(user, h, b, btn, rows)
-                            state["step"] = "wed_city"
+                            wa_send_list(user, h, b, btn, rows); state["step"] = "wed_city"
                         elif svc == "concierge":
-                            h,b,btn,rows = city_list(state["lang"])
-                            wa_send_list(user, h, b, btn, rows)
-                            state["step"] = "cc_city"
+                            wa_send_list(user, h, b, btn, rows); state["step"] = "cc_city"
                         elif svc == "team":
-                            # pedir ciudad para entregar el calendario correcto
-                            h,b,btn,rows = city_list(state["lang"])
-                            wa_send_list(user, h, b, btn, rows)
-                            state["step"] = "handoff_city"
+                            wa_send_list(user, h, b, btn, rows); state["step"] = "handoff_city"
                         continue
                     # si escribió texto raro, re-muestra el menú
                     h,b,btn,rows = main_menu_list(state["lang"])
@@ -560,29 +538,27 @@ async def incoming(req: Request):
                     }
                     city = city_map.get(rid)
                     if not city:
-                        h,b,btn,rows = city_list(state["lang"])
-                        wa_send_list(user, h, b, btn, rows)
-                        continue
+                        h,b,btn,rows = city_list(state["lang"]); wa_send_list(user, h, b, btn, rows); continue
                     state["city"] = city
                     state["step"] = "ask_date"
                     wa_send_text(user, ask_date(state["lang"]))
-                    wa_send_buttons(user, " ", date_buttons(state["lang"]))
+                    wa_send_buttons(user, " ", date_buttons(state["lang"]))  # botones fecha
                     continue
 
-                # ===== Fecha (ambos) =====
+                # ===== Fecha =====
                 if state["step"] == "ask_date":
-                    date_val = parse_date_or_button(reply_id or text, state["lang"])
-                    if date_val is None:  # mal formato → reintento, pero no rompemos
+                    date_val = parse_date_or_button((reply_id or text), state["lang"])
+                    if date_val is None:
                         wa_send_text(user, ask_date(state["lang"]))
                         wa_send_buttons(user, " ", date_buttons(state["lang"]))
                         continue
-                    state["date"] = date_val  # "" si "I don't know"
+                    state["date"] = date_val  # "" si unknown
                     state["step"] = "ask_pax"
                     wa_send_text(user, ask_pax(state["lang"]))
                     wa_send_buttons(user, " ", pax_buttons(state["lang"]))
                     continue
 
-                # ===== Pax (ambos) =====
+                # ===== Pax =====
                 if state["step"] == "ask_pax":
                     pax = 0
                     rid = (reply_id or "").upper()
@@ -591,27 +567,24 @@ async def incoming(req: Request):
                     elif rid == "PAX_9_PLUS": pax = 12
                     else:
                         pax = extract_pax(text)
-                    if pax <= 0: pax = 2  # valor mínimo razonable
+                    if pax <= 0: pax = 2
                     state["pax"] = pax
 
-                    # obtener top opciones (relajado -> siempre hay algo)
+                    svc = state.get("service_type") or "villas"
+                    unit = ("noche" if is_es(state["lang"]) else "night") if svc=="villas" else ("día" if is_es(state["lang"]) else "day")
+
                     if not GOOGLE_SHEET_CSV_URL:
-                        # si no hay catálogo, handoff inmediato
                         owner_name, owner_id, cal_url, pretty_city = owner_for_city(state.get("city"))
                         wa_send_text(user, handoff_text(state["lang"], owner_name, cal_url, pretty_city))
-                        # crea deal
                         contact_id = state.get("contact_id") or hubspot_find_or_create_contact(state.get("name"), state.get("email"), user, state.get("lang"))
-                        title = f"[{pretty_city}] {state.get('service_type','service').title()} via WhatsApp"
+                        title = f"[{pretty_city}] {svc.title()} via WhatsApp"
                         desc  = f"City: {pretty_city}\nDate: {state.get('date') or 'TBD'}\nPax: {pax}\nLang: {state.get('lang')}\nSource: WhatsApp Bot"
-                        if contact_id:
-                            hubspot_create_deal(contact_id, owner_id, title, desc)
+                        if contact_id: hubspot_create_deal(contact_id, owner_id, title, desc)
                         state["step"] = "post_results"
                         wa_send_buttons(user, ("¿Quieres hacer algo más?" if is_es(state["lang"]) else "Anything else?"),
                                         after_results_buttons(state["lang"]))
                         continue
 
-                    svc = state.get("service_type") or "villas"
-                    unit = ("noche" if is_es(state["lang"]) else "night") if svc=="villas" else ("día" if is_es(state["lang"]) else "day")
                     top = find_top_relaxed(service=svc, city=state.get("city"), pax=pax, prefs="", top_k=TOP_K)
                     wa_send_text(user, reply_topN(state["lang"], top, unit=unit))
                     state["last_top"] = top
@@ -631,31 +604,23 @@ async def incoming(req: Request):
                     }
                     city = city_map.get(rid)
                     if not city:
-                        h,b,btn,rows = city_list(state["lang"])
-                        wa_send_list(user, h, b, btn, rows)
-                        continue
+                        h,b,btn,rows = city_list(state["lang"]); wa_send_list(user, h, b, btn, rows); continue
                     state["city"] = city
-                    # pedimos fecha aproximada + pax en 1 paso simple
-                    msg = ("Cuéntame *fecha aproximada* y *número de invitados* (ej. 2025-04, 80). "
-                           "Si no lo sabes aún, escribe 'TBD'."
+                    msg = ("Cuéntame *fecha aproximada* y *número de invitados* (ej. 2025-04, 80). Si no lo sabes aún, escribe 'TBD'."
                            if is_es(state["lang"]) else
-                           "Tell me *approx date* and *guest count* (e.g., 2025-04, 80). "
-                           "If unknown, type 'TBD'.")
+                           "Tell me *approx date* and *guest count* (e.g., 2025-04, 80). If unknown, type 'TBD'.")
                     wa_send_text(user, msg)
                     state["step"] = "wed_info"
                     continue
 
                 if state["step"] == "wed_info":
-                    # Muy libre: tomamos cualquier cosa y seguimos a handoff
                     state["wed_info"] = (text or "")
                     owner_name, owner_id, cal_url, pretty_city = owner_for_city(state.get("city"))
                     wa_send_text(user, handoff_text(state["lang"], owner_name, cal_url, pretty_city))
-                    # deal
                     contact_id = state.get("contact_id") or hubspot_find_or_create_contact(state.get("name"), state.get("email"), user, state.get("lang"))
                     title = f"[{pretty_city}] Weddings & Events via WhatsApp"
                     desc  = f"City: {pretty_city}\nInfo: {state.get('wed_info')}\nLang: {state.get('lang')}\nSource: WhatsApp Bot"
-                    if contact_id:
-                        hubspot_create_deal(contact_id, owner_id, title, desc)
+                    if contact_id: hubspot_create_deal(contact_id, owner_id, title, desc)
                     state["step"] = "post_results"
                     wa_send_buttons(user, ("¿Quieres algo más?" if is_es(state["lang"]) else "Anything else?"),
                                     after_results_buttons(state["lang"]))
@@ -672,15 +637,11 @@ async def incoming(req: Request):
                     }
                     city = city_map.get(rid)
                     if not city:
-                        h,b,btn,rows = city_list(state["lang"])
-                        wa_send_list(user, h, b, btn, rows)
-                        continue
+                        h,b,btn,rows = city_list(state["lang"]); wa_send_list(user, h, b, btn, rows); continue
                     state["city"] = city
-                    msg = ("¿Qué necesitas? (reservas, transporte, chef, seguridad, experiencias privadas). "
-                           "Responde libremente."
+                    msg = ("¿Qué necesitas? (reservas, transporte, chef, seguridad, experiencias privadas). Responde libremente."
                            if is_es(state["lang"]) else
-                           "What do you need? (reservations, transport, private chef, security, private experiences). "
-                           "Reply freely.")
+                           "What do you need? (reservations, transport, private chef, security, private experiences). Reply freely.")
                     wa_send_text(user, msg)
                     state["step"] = "cc_info"
                     continue
@@ -689,12 +650,10 @@ async def incoming(req: Request):
                     state["cc_info"] = (text or "")
                     owner_name, owner_id, cal_url, pretty_city = owner_for_city(state.get("city"))
                     wa_send_text(user, handoff_text(state["lang"], owner_name, cal_url, pretty_city))
-                    # deal
                     contact_id = state.get("contact_id") or hubspot_find_or_create_contact(state.get("name"), state.get("email"), user, state.get("lang"))
                     title = f"[{pretty_city}] Concierge via WhatsApp"
                     desc  = f"City: {pretty_city}\nRequest: {state.get('cc_info')}\nLang: {state.get('lang')}\nSource: WhatsApp Bot"
-                    if contact_id:
-                        hubspot_create_deal(contact_id, owner_id, title, desc)
+                    if contact_id: hubspot_create_deal(contact_id, owner_id, title, desc)
                     state["step"] = "post_results"
                     wa_send_buttons(user, ("¿Algo más?" if is_es(state["lang"]) else "Anything else?"),
                                     after_results_buttons(state["lang"]))
@@ -711,46 +670,34 @@ async def incoming(req: Request):
                     }
                     city = city_map.get(rid)
                     if not city:
-                        h,b,btn,rows = city_list(state["lang"])
-                        wa_send_list(user, h, b, btn, rows)
-                        continue
+                        h,b,btn,rows = city_list(state["lang"]); wa_send_list(user, h, b, btn, rows); continue
                     state["city"] = city
                     owner_name, owner_id, cal_url, pretty_city = owner_for_city(city)
                     wa_send_text(user, handoff_text(state["lang"], owner_name, cal_url, pretty_city))
-                    # crea deal simple
                     contact_id = state.get("contact_id") or hubspot_find_or_create_contact(state.get("name"), state.get("email"), user, state.get("lang"))
                     title = f"[{pretty_city}] Talk to the Team via WhatsApp"
-                    # incluye últimos datos si existen
                     desc  = f"City: {pretty_city}\nService: {state.get('service_type') or 'N/A'}\nDate: {state.get('date') or 'TBD'}\nPax: {state.get('pax') or 'TBD'}\nLang: {state.get('lang')}\nSource: WhatsApp Bot"
                     if state.get("last_top"):
                         tops = "; ".join([f"{r.get('name')}→{r.get('url')}" for r in state["last_top"][:TOP_K]])
                         desc += f"\nTop shown: {tops}"
-                    if contact_id:
-                        hubspot_create_deal(contact_id, owner_id, title, desc)
+                    if contact_id: hubspot_create_deal(contact_id, owner_id, title, desc)
                     state["step"] = "post_results"
                     wa_send_buttons(user, ("¿Qué más necesitas?" if is_es(state["lang"]) else "What else do you need?"),
                                     after_results_buttons(state["lang"]))
                     continue
 
-                # ===== Post-results (navegación) =====
+                # ===== Post-results =====
                 if state["step"] == "post_results":
                     rid = (reply_id or "").upper()
                     if rid == "POST_ADD_SERVICE":
                         state["step"] = "menu"
-                        h,b,btn,rows = main_menu_list(state["lang"])
-                        wa_send_list(user, h, b, btn, rows)
-                        continue
+                        h,b,btn,rows = main_menu_list(state["lang"]); wa_send_list(user, h, b, btn, rows); continue
                     if rid == "POST_TALK_TEAM":
                         state["step"] = "handoff_city"
-                        h,b,btn,rows = city_list(state["lang"])
-                        wa_send_list(user, h, b, btn, rows)
-                        continue
+                        h,b,btn,rows = city_list(state["lang"]); wa_send_list(user, h, b, btn, rows); continue
                     if rid == "POST_MENU":
                         state["step"] = "menu"
-                        h,b,btn,rows = main_menu_list(state["lang"])
-                        wa_send_list(user, h, b, btn, rows)
-                        continue
-                    # default: re-mostrar botones post
+                        h,b,btn,rows = main_menu_list(state["lang"]); wa_send_list(user, h, b, btn, rows); continue
                     wa_send_buttons(user, ("¿Quieres añadir otro servicio o hablar con el equipo?"
                                            if is_es(state["lang"]) else
                                            "Would you like to add another service or talk to the team?"),
