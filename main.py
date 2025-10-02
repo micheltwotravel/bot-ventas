@@ -1,180 +1,157 @@
 # main.py
-import os, re, csv, io, json, requests
+import os, re, csv, io, requests
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
 
 app = FastAPI()
 
-# =============== ENV (strip para evitar espacios/saltos) ======================
-VERIFY_TOKEN        = (os.getenv("WA_VERIFY_TOKEN") or "").strip()
-WA_TOKEN            = (os.getenv("WA_ACCESS_TOKEN") or "").strip()
-WA_PHONE_ID         = (os.getenv("WA_PHONE_NUMBER_ID") or "").strip()
-TOP_K               = int(os.getenv("TOP_K", "3").strip() or 3)
+# ====== ENV (sanitize) ======
+VERIFY_TOKEN = (os.getenv("WA_VERIFY_TOKEN") or "").strip()
+WA_TOKEN     = (os.getenv("WA_ACCESS_TOKEN") or "").strip()
+WA_PHONE_ID  = (os.getenv("WA_PHONE_NUMBER_ID") or "").strip()
 
-HUBSPOT_TOKEN       = (os.getenv("HUBSPOT_TOKEN") or "").strip()              # Private App
-HUBSPOT_PIPELINE    = (os.getenv("HUBSPOT_PIPELINE") or "default").strip()    # ej: "default" o id de pipeline
-HUBSPOT_STAGE       = (os.getenv("HUBSPOT_STAGE") or "appointmentscheduled").strip()
-HUBSPOT_OWNER_ID    = (os.getenv("HUBSPOT_OWNER_ID") or "").strip()           # opcional: asignar propietario
-GOOGLE_SHEET_CSV_URL= (os.getenv("GOOGLE_SHEET_CSV_URL") or "").strip()
+# ====== Config ======
+TOP_K = int(os.getenv("TOP_K", "3"))  # 2 o 3
+HUBSPOT_TOKEN        = (os.getenv("HUBSPOT_TOKEN") or "").strip()
+GOOGLE_SHEET_CSV_URL = (os.getenv("GOOGLE_SHEET_CSV_URL") or "").strip()
 
-# =============== Estado en memoria (MVP) ======================================
-# Por número de WhatsApp
-SESSIONS = {}  # { phone: {step, lang, name, email, service_type, ...} }
+# ====== Estado en memoria ======
+SESSIONS = {}  # { phone: {...} }
 
-# ==============================================================================
-#                               WhatsApp helpers
-# ==============================================================================
-def _wa_headers():
-    return {
-        "Authorization": f"Bearer {WA_TOKEN}",
+# ====== WhatsApp helpers ======
+def _wa_post(json_payload):
+    url = f"https://graph.facebook.com/v23.0/{(WA_PHONE_ID or '').strip()}/messages"
+    headers = {
+        "Authorization": f"Bearer {(WA_TOKEN or '').strip()}",
         "Content-Type": "application/json",
     }
+    r = requests.post(url, headers=headers, json=json_payload, timeout=20)
+    print("WA ->", r.status_code, r.text[:200])
+    if r.status_code == 401:
+        print("⚠️ WA TOKEN INVALID/EXPIRED. Actualiza WA_ACCESS_TOKEN.")
+    if r.status_code == 400:
+        print("⚠️ BAD REQUEST. Revisa WA_PHONE_ID / payload.")
+    return r.status_code
 
-def wa_send_text(to: str, body: str) -> int:
-    """Envío de texto simple. Maneja logs útiles."""
-    url = f"https://graph.facebook.com/v23.0/{WA_PHONE_ID}/messages"
+def wa_send_text(to: str, body: str):
     payload = {
         "messaging_product": "whatsapp",
         "to": to,
         "type": "text",
         "text": {"body": body}
     }
-    try:
-        r = requests.post(url, headers=_wa_headers(), json=payload, timeout=20)
-    except Exception as e:
-        print("WA send exception:", e)
-        return 0
-    print(f"WA send -> {r.status_code} to={to} resp={r.text[:180]}")
-    if r.status_code == 401:
-        print("⚠️ WA TOKEN INVALID/EXPIRED. Revisa WA_ACCESS_TOKEN en Render.")
-    if r.status_code == 400:
-        print(f"⚠️ BAD REQUEST. phone_id={repr(WA_PHONE_ID)}")
-    return r.status_code
+    return _wa_post(payload)
 
-def extract_text(m: dict) -> str:
-    """Extrae texto del mensaje (text/button/interactive) y normaliza."""
+def wa_send_buttons(to: str, body: str, buttons: list):
+    """
+    buttons: [{"id":"btn_id","title":"1️⃣ Texto"}, ...]  # máx 3
+    """
+    if len(buttons) > 3:
+        buttons = buttons[:3]
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "interactive",
+        "interactive": {
+            "type": "button",
+            "body": {"text": body},
+            "action": {
+                "buttons": [{"type":"reply","reply":{"id":b["id"],"title":b["title"]}} for b in buttons]
+            }
+        }
+    }
+    return _wa_post(payload)
+
+def wa_send_list(to: str, header_text: str, body_text: str, footer_text: str, rows: list, section_title: str="Opciones"):
+    """
+    rows: [{"id":"row_id","title":"1️⃣ Opción","description":"texto opcional"}, ...]
+    Puede tener muchas filas.
+    """
+    payload = {
+        "messaging_product":"whatsapp",
+        "to": to,
+        "type":"interactive",
+        "interactive":{
+            "type":"list",
+            "header":{"type":"text","text": header_text[:60] if header_text else "Two Travel"},
+            "body":{"text": body_text},
+            "footer":{"text": footer_text[:60] if footer_text else ""},
+            "action":{
+                "button":"Elegir",
+                "sections":[{"title": section_title, "rows":[
+                    {"id": r["id"], "title": r["title"], **({"description": r["description"]} if r.get("description") else {})}
+                    for r in rows
+                ]}]
+            }
+        }
+    }
+    return _wa_post(payload)
+
+def extract_selection(m: dict):
+    """
+    Devuelve (text, selection_id) soportando text/button/list.
+    """
     t = (m.get("type") or "").lower()
     if t == "text":
-        return ((m.get("text") or {}).get("body") or "").strip()
+        return ((m.get("text") or {}).get("body") or "").strip(), None
     if t == "button":
-        return ((m.get("button") or {}).get("text") or "").strip()
+        btn = (m.get("button") or {})
+        return (btn.get("text") or "").strip(), (btn.get("payload") or "").strip() or None
     if t == "interactive":
         inter = m.get("interactive") or {}
-        if inter.get("type") == "button_reply":
-            return ((inter.get("button_reply") or {}).get("title") or "").strip()
-        if inter.get("type") == "list_reply":
-            return ((inter.get("list_reply") or {}).get("title") or "").strip()
-    return ""  # stickers/medios no tienen texto útil
+        i_type = inter.get("type")
+        if i_type == "button_reply":
+            br = inter.get("button_reply") or {}
+            return (br.get("title") or "").strip(), (br.get("id") or "").strip() or None
+        if i_type == "list_reply":
+            lr = inter.get("list_reply") or {}
+            return (lr.get("title") or "").strip(), (lr.get("id") or "").strip() or None
+    return "", None
 
-# ==============================================================================
-#                                HubSpot helpers
-# ==============================================================================
+# ====== HubSpot ======
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
-def _hs_headers():
-    return {
-        "Authorization": f"Bearer {HUBSPOT_TOKEN}",
-        "Content-Type": "application/json",
-    }
-
-def hs_upsert_contact(name: str, email: str, phone: str, lang: str):
-    """Crea o actualiza un Contact en HubSpot."""
+def hubspot_upsert_contact(name: str, email: str, phone: str, lang: str):
     if not HUBSPOT_TOKEN:
         print("WARN: HUBSPOT_TOKEN missing")
-        return None
-
+        return False
     base = "https://api.hubapi.com/crm/v3/objects/contacts"
+    headers = {"Authorization": f"Bearer {HUBSPOT_TOKEN}","Content-Type":"application/json"}
     props = {
         "email": email,
         "firstname": (name.split()[0] if name else None),
-        "lastname": (" ".join(name.split()[1:]) if name and len(name.split()) > 1 else None),
+        "lastname": (" ".join(name.split()[1:]) if name and len(name.split())>1 else None),
         "phone": phone,
         "hs_lead_status": "NEW",
         "lifecyclestage": "lead",
         "preferred_language": ("es" if (lang or "ES").upper().startswith("ES") else "en"),
         "source": "WhatsApp Bot",
     }
-
-    try:
-        r = requests.post(base, headers=_hs_headers(), json={"properties": props}, timeout=20)
-    except Exception as e:
-        print("HubSpot create error:", e); return None
-
-    if r.status_code == 201:
-        cid = r.json().get("id")
-        print("HubSpot contact created:", cid)
-        return cid
-
+    # create
+    r = requests.post(base, headers=headers, json={"properties": props}, timeout=20)
+    if r.status_code == 201: return True
+    # conflict → update
     if r.status_code == 409:
-        # Buscar por email y actualizar
-        s = requests.post(f"{base}/search", headers=_hs_headers(), json={
-            "filterGroups": [{"filters":[{"propertyName":"email","operator":"EQ","value":email}]}],
-            "properties": ["email"]
+        s = requests.post(f"{base}/search", headers=headers, json={
+            "filterGroups":[{"filters":[{"propertyName":"email","operator":"EQ","value":email}]}],
+            "properties":["email"]
         }, timeout=20)
-        if s.ok and s.json().get("results"):
+        if s.ok and (s.json().get("results") or []):
             cid = s.json()["results"][0]["id"]
-            up = requests.patch(f"{base}/{cid}", headers=_hs_headers(), json={"properties": props}, timeout=20)
-            print("HubSpot contact update:", up.status_code)
-            return cid
-        print("HubSpot 409 but no results:", s.status_code, s.text[:150])
-        return None
+            up = requests.patch(f"{base}/{cid}", headers=headers, json={"properties": props}, timeout=20)
+            return up.ok
+    print("HubSpot upsert error:", r.status_code, r.text[:200])
+    return False
 
-    print("HubSpot contact error:", r.status_code, r.text[:180])
-    return None
-
-def hs_create_deal(contact_id: str, service_type: str, city: str, date_range: str, pax: int, lang: str):
-    """Crea un Deal (oportunidad) simple y lo asocia al Contact."""
-    if not HUBSPOT_TOKEN or not contact_id:
-        return None
-
-    base = "https://api.hubapi.com/crm/v3/objects/deals"
-    title = f"[WhatsApp] {service_type.title()} - {city or '—'} ({pax or 0} pax)"
-    props = {
-        "dealname": title,
-        "pipeline": HUBSPOT_PIPELINE or "default",
-        "dealstage": HUBSPOT_STAGE or "appointmentscheduled",
-        "description": f"Origen: WhatsApp Bot\nServicio: {service_type}\nCiudad: {city}\nFechas: {date_range}\nPax: {pax}\nIdioma: {lang}",
-        "source": "WhatsApp Bot",
-    }
-    if HUBSPOT_OWNER_ID:
-        props["hubspot_owner_id"] = HUBSPOT_OWNER_ID
-
-    try:
-        r = requests.post(base, headers=_hs_headers(),
-                          json={"properties": props,
-                                "associations": [{
-                                     "to": {"id": contact_id},
-                                     "types": [{"associationCategory":"HUBSPOT_DEFINED","associationTypeId":3}]  # 3: deal-to-contact
-                                }]},
-                          timeout=20)
-    except Exception as e:
-        print("HubSpot deal create exception:", e); return None
-
-    if r.ok:
-        did = r.json().get("id")
-        print("HubSpot deal created:", did)
-        return did
-
-    print("HubSpot deal error:", r.status_code, r.text[:180])
-    return None
-
-# ==============================================================================
-#                             Catálogo (Google Sheet)
-# ==============================================================================
+# ====== Catálogo (Google Sheet CSV) ======
 def load_catalog():
     if not GOOGLE_SHEET_CSV_URL:
         print("WARN: GOOGLE_SHEET_CSV_URL missing")
         return []
-
-    try:
-        r = requests.get(GOOGLE_SHEET_CSV_URL, timeout=30)
-    except Exception as e:
-        print("Catalog download exception:", e); return []
-
+    r = requests.get(GOOGLE_SHEET_CSV_URL, timeout=30)
     if not r.ok:
         print("Catalog download error:", r.status_code, r.text[:200])
         return []
-
     rows = []
     content = r.content.decode("utf-8", errors="ignore")
     reader = csv.DictReader(io.StringIO(content))
@@ -184,57 +161,50 @@ def load_catalog():
     return rows
 
 def find_top(service: str, city: str, pax: int, prefs: str, top_k: int = TOP_K):
-    """Filtra catálogo y devuelve TOP N por precio ascendente."""
-    rows = load_catalog()
-    if not rows:
-        return []
-
     service = (service or "").strip().lower()
     city    = (city or "").strip().lower()
     prefs_l = [p.strip().lower() for p in (prefs or "").split(",") if p.strip()]
-
+    rows = load_catalog()
+    if not rows: return []
     def row_ok(r):
-        if (r.get("service_type","").lower() != service):
-            return False
-        if city and (r.get("city","").lower() != city):
-            return False
-        try:
-            cap = int(float(r.get("capacity_max","0") or "0"))
-        except:
-            cap = 0
-        if pax and cap < pax:
-            return False
+        if (r.get("service_type","").lower() != service): return False
+        if city and (r.get("city","").lower() != city):    return False
+        try: cap = int(float(r.get("capacity_max","0") or "0"))
+        except: cap = 0
+        if pax and cap < pax: return False
         if prefs_l:
             tags = [t.strip().lower() for t in (r.get("preference_tags","") or "").split(",") if t.strip()]
-            if not any(p in tags for p in prefs_l):
-                return False
+            if not any(p in tags for p in prefs_l): return False
         return True
-
     filtered = [r for r in rows if row_ok(r)]
-
     def price_val(r):
-        try:
-            return float(r.get("price_from_usd","999999") or "999999")
-        except:
-            return 999999.0
-
+        try: return float(r.get("price_from_usd","999999") or "999999")
+        except: return 999999.0
     filtered.sort(key=price_val)
     return filtered[:max(1, int(top_k or 1))]
 
-# ==============================================================================
-#                             Copy / Mensajería (ES/EN)
-# ==============================================================================
+# ====== Copy / tono ======
 def is_es(lang: str) -> bool:
     return (lang or "ES").upper().startswith("ES")
 
+def brand_header(lang: str):
+    return "Two Travel · Concierge" if is_es(lang) else "Two Travel · Concierge"
+
 def opener_bi():
     return (
-        "Two Travel ✨\n\n"
-        "ES — ¡Hola! Soy tu concierge virtual. Puedo ayudarte con *villas*, *botes*, *islas*, *bodas/eventos* y *concierge*.\n"
-        "¿En qué idioma prefieres continuar?\n\n"
-        "EN — Hi! I’m your virtual concierge. I can help with *villas*, *boats*, *islands*, *weddings/events* and *concierge*.\n"
-        "Which language would you prefer?"
+        "Two Travel 🛎️✨\n\n"
+        "ES: ¡Bienvenido! Soy tu concierge virtual de lujo. ¿En qué idioma prefieres continuar?\n"
+        "EN: Welcome! I’m your luxury virtual concierge. Which language would you prefer?"
     )
+
+def ask_contact(lang: str):
+    return ("Para enviarte opciones y una cotización personalizada, necesito tus datos.\n"
+            "1️⃣ Nombre completo\n2️⃣ Luego tu correo") if is_es(lang) \
+        else ("To share options and a personalized quote, I’ll need your details.\n"
+              "1️⃣ Full name\n2️⃣ Then your email")
+
+def ask_email(lang: str):
+    return "📧 Tu correo electrónico:" if is_es(lang) else "📧 Your email address:"
 
 def ask_name_again(lang: str):
     return "¿Me confirmas tu *nombre y apellido*?" if is_es(lang) else "Could you share *name and last name*?"
@@ -242,71 +212,35 @@ def ask_name_again(lang: str):
 def ask_email_again(lang: str):
     return "Ese correo no parece válido, ¿puedes revisarlo?" if is_es(lang) else "That email looks invalid, mind checking it?"
 
-def main_menu(lang: str):
-    return (
-        "Genial. ¿Qué necesitas hoy?\n"
-        "• *Villas & Casas* 🏠\n"
-        "• *Botes & Yates* 🚤\n"
-        "• *Islas Privadas* 🏝️\n"
-        "• *Bodas & Eventos* 💍🎉\n"
-        "• *Concierge* ✨\n"
-        "• *Hablar con ventas* 👤"
-        if is_es(lang) else
-        "Great. What do you need today?\n"
-        "• *Villas & Homes* 🏠\n"
-        "• *Boats & Yachts* 🚤\n"
-        "• *Private Islands* 🏝️\n"
-        "• *Weddings & Events* 💍🎉\n"
-        "• *Concierge* ✨\n"
-        "• *Talk to sales* 👤"
-    )
-
-def q_villas_city(lang):  return "¿En qué *ciudad* buscas? (Cartagena / Medellín / Tulum / CDMX)" if is_es(lang) else "Which *city*?"
-def q_villas_dates(lang): return "¿Fechas de *check-in y check-out*? (YYYY-MM-DD)" if is_es(lang) else "Check-in and check-out dates? (YYYY-MM-DD)"
-def q_villas_pax(lang):   return "¿Para cuántas *personas*?" if is_es(lang) else "How many *guests*?"
-def q_villas_prefs(lang): return "¿Alguna *preferencia*? Frente al mar / Centro histórico / Zona exclusiva / Cualquiera" if is_es(lang) else "Any *preference*? Oceanfront / Historic center / Exclusive area / No preference"
-
-def q_boats_city(lang):   return "¿Ciudad/puerto de salida? (*Cartagena*)" if is_es(lang) else "City/port of departure? (*Cartagena*)"
-def q_boats_date(lang):   return "¿*Fecha* del paseo? (YYYY-MM-DD; ¿*día o noche*?)" if is_es(lang) else "Trip *date*? (YYYY-MM-DD; *day or night*?)"
-def q_boats_pax(lang):    return "¿Número de *pasajeros*?" if is_es(lang) else "Number of *passengers*?"
-def q_boats_type(lang):   return "Tipo: *Lancha* / *Yate* / *Catamarán*. Tour: *Cholón*, *Islas del Rosario*, etc." if is_es(lang) else "Type: *Speedboat* / *Yacht* / *Catamaran*. Tour: *Cholón*, *Rosario Islands*, etc."
-
-def q_wed_city(lang):     return "Ciudad • *fecha aproximada* • *# invitados* • tipo de *venue* (playa, histórico, finca, moderno) • ¿*Full planning*?" if is_es(lang) else "City • *approx date* • *guest count* • *venue* type (beach, historic, estate, modern) • *Full planning*?"
-def r_wed_estimate(lang): return ("Con esa info preparo un *estimado*. ¿Te conecto con *Weddings* para afinar propuesta y visitas?" if is_es(lang) else "We’ll prepare an *estimate*. Connect with *Weddings* to refine proposal and site visits?")
-
-def q_concierge(lang):    return "Ciudad / Fechas / Servicios (reservas, transporte, chef, seguridad, experiencias privadas)." if is_es(lang) else "City / Dates / Services (reservations, transport, private chef, security, private experiences)."
-def r_concierge(lang):    return ("Servicio 100% personalizado. *Desde* USD estimado por persona por viaje. *Ventas* confirma el valor final según agenda y servicios. ¿Te conecto con ventas?" if is_es(lang) else "100% personalized. *From* an estimated USD per person per trip. *Sales* will confirm final pricing. Connect with sales?")
-
-def reply_topN(lang: str, items: list, unit: str = "noche"):
+def reply_topN(lang: str, items: list, unit: str):
     if not items:
-        return ("No veo opciones con esos filtros. ¿Intento con *fechas cercanas (±3 días)* o ajustamos el *tamaño del grupo*?"
+        return ("No veo opciones con esos filtros. ¿Busco *fechas cercanas (±3 días)* o ajusto *personas*?"
                 if is_es(lang) else
-                "I couldn’t find matches. Try *nearby dates (±3 days)* or adjust the *party size*?")
+                "No matches found. Try *nearby dates (±3 days)* or adjust the *party size*?")
     es = is_es(lang)
     lines = []
     if es:
-        lines.append(f"Estas son nuestras {len(items)} mejores opción(es) (precios *desde*):")
+        lines.append("Estas son nuestras mejores opciones (precios *desde*):")
         for r in items:
-            lines.append(f"• {r.get('name')} — {r.get('capacity_max','?')} pax — USD {r.get('price_from_usd','?')}/{unit}\n  {r.get('url')}")
-        lines.append("La *disponibilidad final* la confirma nuestro equipo de *ventas* antes de reservar. ¿Quieres que te conecte con ventas para confirmación y cotización final?")
+            lines.append(f"• {r.get('name')} · {r.get('capacity_max','?')} pax — USD {r.get('price_from_usd','?')}/{unit} → {r.get('url')}")
+        lines.append("La *disponibilidad final* la confirma nuestro equipo de *Ventas* antes de reservar.")
     else:
-        lines.append(f"Here are the top {len(items)} option(s) (*prices from*):")
+        lines.append("Here are top options (*prices from*):")
         for r in items:
-            lines.append(f"• {r.get('name')} — {r.get('capacity_max','?')} guests — USD {r.get('price_from_usd','?')}/{unit}\n  {r.get('url')}")
-        lines.append("Final *availability* is confirmed by our *sales* team before booking. Connect with sales?")
+            lines.append(f"• {r.get('name')} · {r.get('capacity_max','?')} guests — USD {r.get('price_from_usd','?')}/{unit} → {r.get('url')}")
+        lines.append("Final *availability* is confirmed by our *Sales* team before booking.")
     return "\n".join(lines)
 
 def add_another_or_sales(lang: str):
-    return ("¿Quieres *cotizar otro servicio* además de este?\n• *Añadir otro servicio*\n• *Conectar con ventas*"
-            if is_es(lang) else
-            "Would you like to *quote another service* as well?\n• *Add another service*\n• *Connect with sales*")
+    return ("¿Quieres *añadir otro servicio* o *conectar con Ventas*?" if is_es(lang)
+            else "Would you like to *add another service* or *connect with Sales*?")
 
-def handoff_client(lang: str):
-    return ("Te conecto con el *Equipo de Ventas TwoTravel* para confirmar *disponibilidad* y cerrar la *reserva*."
+def handoff_client(lang: str, owner_name: str, team: str):
+    return (f"Te conecto con [{owner_name} – Ventas {team}] para confirmar *disponibilidad* y cerrar la *reserva*."
             if is_es(lang) else
-            "Connecting you with the *TwoTravel Sales Team* to confirm *availability* and finalize the *booking*.")
+            f"Connecting you with [{owner_name} – {team} Sales] to confirm *availability* and finalize your *booking*.")
 
-# Validación de nombre robusta
+# ====== Validaciones nombre ======
 def valid_name(fullname: str) -> bool:
     tokens = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ']{2,}", (fullname or ""))
     return len(tokens) >= 2
@@ -315,40 +249,39 @@ def normalize_name(fullname: str) -> str:
     tokens = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ']{2,}", (fullname or ""))
     return " ".join(tokens[:3]).title()
 
-# ==============================================================================
-#                                    FastAPI
-# ==============================================================================
+# ====== Startup ======
 @app.on_event("startup")
 async def show_routes():
     print("BOOT> Routes:", [r.path for r in app.router.routes])
     print("BOOT> WA_PHONE_ID:", repr(WA_PHONE_ID))
     print("BOOT> WA_TOKEN len:", len(WA_TOKEN or ""))
 
+# ====== Health ======
 @app.get("/")
 def root():
     return {"ok": True, "routes": [r.path for r in app.router.routes]}
 
-# --- Verify webhook (GET)
+# ====== Verify ======
 @app.get("/wa-webhook")
 async def verify(req: Request):
-    mode      = req.query_params.get("hub.mode")
-    token     = req.query_params.get("hub.verify_token")
+    mode = req.query_params.get("hub.mode")
+    token = req.query_params.get("hub.verify_token")
     challenge = req.query_params.get("hub.challenge")
     if mode == "subscribe" and token == VERIFY_TOKEN and challenge:
         return PlainTextResponse(challenge, status_code=200)
     return PlainTextResponse("forbidden", status_code=403)
 
-# --- Incoming (POST)
+# ====== Incoming ======
 @app.post("/wa-webhook")
 async def incoming(req: Request):
     data = await req.json()
-    print("Incoming:", json.dumps(data, ensure_ascii=False)[:600])
+    print("Incoming:", data)
 
     for entry in data.get("entry", []):
         for change in entry.get("changes", []):
             value = change.get("value", {})
 
-            # Ignorar estados de entrega
+            # Ignorar estatus (sent/delivered/read)
             if value.get("statuses"):
                 continue
 
@@ -357,114 +290,184 @@ async def incoming(req: Request):
                 if not user:
                     continue
 
-                # Bienvenida automática ante PRIMER mensaje
+                # Primera vez → saludo + selección de idioma (BOTONES)
                 if user not in SESSIONS:
                     SESSIONS[user] = {"step": "lang", "lang": "ES"}
-                    wa_send_text(user, opener_bi())
+                    wa_send_buttons(
+                        user,
+                        opener_bi(),
+                        [
+                            {"id":"lang_es","title":"1️⃣ Español"},
+                            {"id":"lang_en","title":"2️⃣ English"},
+                        ]
+                    )
                     continue
 
-                text  = extract_text(m)
+                text, sel_id = extract_selection(m)
                 state = SESSIONS[user]
 
-                # 0) Selección de idioma
+                # ===== LENGUAJE =====
                 if state["step"] == "lang":
-                    low = (text or "").strip().lower()
-                    if low in ("es","español"):
+                    if sel_id == "lang_es" or text.lower() in ("es","español","1"):
                         state["lang"] = "ES"
-                    elif low in ("en","english"):
+                    elif sel_id == "lang_en" or text.lower() in ("en","english","2"):
                         state["lang"] = "EN"
                     else:
-                        wa_send_text(user, opener_bi())
+                        wa_send_buttons(
+                            user,
+                            opener_bi(),
+                            [{"id":"lang_es","title":"1️⃣ Español"},{"id":"lang_en","title":"2️⃣ English"}]
+                        )
                         continue
                     state["step"] = "contact_name"
-                    wa_send_text(user, ("Para enviarte opciones y una cotización personalizada, necesito tus datos:\n"
-                                        "📛 *Nombre completo:*\n"
-                                        " _(Luego te pido el correo)_" )
-                                 if is_es(state["lang"]) else
-                                 ("To share options and a personalized quote, I’ll need your details:\n"
-                                  "📛 *Full name:*\n"
-                                  " _(I’ll ask your email next)_"))
+                    wa_send_text(user, ask_contact(state["lang"]))
                     continue
 
-                # 1) Captura de nombre
+                # ===== NOMBRE =====
                 if state["step"] == "contact_name":
                     if not valid_name(text):
                         wa_send_text(user, ask_name_again(state["lang"]))
                         continue
                     state["name"] = normalize_name(text)
                     state["step"] = "contact_email"
-                    wa_send_text(user, "📧 *Correo electrónico:*" if is_es(state["lang"]) else "📧 *Email address:*")
+                    wa_send_text(user, ask_email(state["lang"]))
                     continue
 
-                # 2) Captura de email + HubSpot Contact
+                # ===== EMAIL =====
                 if state["step"] == "contact_email":
                     if not EMAIL_RE.match(text or ""):
                         wa_send_text(user, ask_email_again(state["lang"]))
                         continue
                     state["email"] = (text or "").strip()
-                    # Upsert Contact (no bloquea el flujo si falla)
+
+                    # HubSpot
                     try:
-                        state["hs_contact_id"] = hs_upsert_contact(state.get("name"), state.get("email"), user, state.get("lang"))
+                        hubspot_upsert_contact(state.get("name"), state.get("email"), user, state.get("lang"))
                     except Exception as e:
-                        print("HubSpot upsert exception:", e)
+                        print("HubSpot error:", e)
+
+                    # Menú → usar LIST (6 opciones numeradas)
                     state["step"] = "menu"
-                    wa_send_text(user, main_menu(state["lang"]))
+                    rows = [
+                        {"id":"menu_1_villas",   "title":"1️⃣ Villas & Casas 🏠"},
+                        {"id":"menu_2_boats",    "title":"2️⃣ Botes & Yates 🚤"},
+                        {"id":"menu_3_islands",  "title":"3️⃣ Islas Privadas 🏝️"},
+                        {"id":"menu_4_weddings", "title":"4️⃣ Bodas & Eventos 💍🎉"},
+                        {"id":"menu_5_concierge","title":"5️⃣ Concierge ✨"},
+                        {"id":"menu_6_sales",    "title":"6️⃣ Hablar con ventas 👤"},
+                    ]
+                    wa_send_list(
+                        user,
+                        brand_header(state["lang"]),
+                        ("Genial. ¿Qué necesitas hoy?" if is_es(state["lang"]) else "Great. What do you need today?"),
+                        ("Two Travel" if is_es(state["lang"]) else "Two Travel"),
+                        rows,
+                        section_title=("Servicios" if is_es(state["lang"]) else "Services")
+                    )
                     continue
 
-                # 3) Menú principal
+                # ===== MENU =====
                 if state["step"] == "menu":
-                    t = (text or "").strip().lower()
-                    if any(k in t for k in ("villas","villa","casas","homes","home")):
-                        state["service_type"] = "villas"
-                        state["step"] = "villas_city"
-                        wa_send_text(user, q_villas_city(state["lang"]))
+                    sid = (sel_id or "").lower()
+                    t = (text or "").lower()
+                    if sid=="menu_1_villas" or "villas" in t:
+                        state["service_type"]="villas"; state["step"]="villas_city"
+                        wa_send_list(
+                            user, brand_header(state["lang"]),
+                            ("¿En qué ciudad buscas?" if is_es(state["lang"]) else "Which city?"),
+                            "Two Travel",
+                            [
+                                {"id":"villas_city_cartagena","title":"1️⃣ Cartagena"},
+                                {"id":"villas_city_medellin","title":"2️⃣ Medellín"},
+                                {"id":"villas_city_tulum","title":"3️⃣ Tulum"},
+                                {"id":"villas_city_cdmx","title":"4️⃣ CDMX"},
+                                {"id":"villas_city_other","title":"5️⃣ Otra / Other"},
+                            ],
+                            section_title=("Ciudades" if is_es(state["lang"]) else "Cities")
+                        )
                         continue
-                    if any(k in t for k in ("botes","yates","boats","yachts","lancha","catamarán","catamaran")):
-                        state["service_type"] = "boats"
-                        state["step"] = "boats_city"
-                        wa_send_text(user, q_boats_city(state["lang"]))
+                    if sid=="menu_2_boats" or "botes" in t or "boats" in t:
+                        state["service_type"]="boats"; state["step"]="boats_city"
+                        wa_send_list(
+                            user, brand_header(state["lang"]),
+                            ("Ciudad/puerto de salida" if is_es(state["lang"]) else "City / port of departure"),
+                            "Two Travel",
+                            [{"id":"boats_city_cartagena","title":"1️⃣ Cartagena"}],
+                            section_title=("Puertos" if is_es(state["lang"]) else "Ports")
+                        )
                         continue
-                    if any(k in t for k in ("islas","island","islands","private islands")):
-                        state["service_type"] = "islands"
-                        state["step"] = "villas_city"
-                        wa_send_text(user, q_villas_city(state["lang"]))
+                    if sid=="menu_3_islands" or "isla" in t or "island" in t:
+                        state["service_type"]="islands"; state["step"]="villas_city"
+                        wa_send_list(
+                            user, brand_header(state["lang"]),
+                            ("¿En qué ciudad buscas?" if is_es(state["lang"]) else "Which city?"),
+                            "Two Travel",
+                            [
+                                {"id":"villas_city_cartagena","title":"1️⃣ Cartagena"},
+                                {"id":"villas_city_medellin","title":"2️⃣ Medellín"},
+                                {"id":"villas_city_tulum","title":"3️⃣ Tulum"},
+                                {"id":"villas_city_cdmx","title":"4️⃣ CDMX"},
+                                {"id":"villas_city_other","title":"5️⃣ Otra / Other"},
+                            ],
+                            section_title=("Ciudades" if is_es(state["lang"]) else "Cities")
+                        )
                         continue
-                    if any(k in t for k in ("bodas","eventos","weddings","events")):
-                        state["service_type"] = "weddings"
-                        state["step"] = "weddings_form"
-                        wa_send_text(user, q_wed_city(state["lang"]))
+                    if sid=="menu_4_weddings" or "boda" in t or "wedding" in t:
+                        state["service_type"]="weddings"; state["step"]="weddings_form"
+                        wa_send_text(user,
+                                     "Ciudad y fecha aproximada / # invitados / Tipo de venue (playa, histórico, finca, moderno) / ¿Full planning?"
+                                     if is_es(state["lang"]) else
+                                     "City & approx date / guest count / venue type (beach, historic, estate, modern) / Full planning?")
                         continue
-                    if any(k in t for k in ("concierge","conserje","experiencias","experiences")):
-                        state["service_type"] = "concierge"
-                        state["step"] = "concierge_form"
-                        wa_send_text(user, q_concierge(state["lang"]))
+                    if sid=="menu_5_concierge" or "concierge" in t:
+                        state["service_type"]="concierge"; state["step"]="concierge_form"
+                        wa_send_text(user,
+                                     "Ciudad / Fechas / Servicios (reservas, transporte, chef, seguridad, experiencias privadas)."
+                                     if is_es(state["lang"]) else
+                                     "City / Dates / Services (reservations, transport, private chef, security, private experiences).")
                         continue
-                    if any(k in t for k in ("venta","ventas","sales","talk to sales","hablar con ventas","conectar con ventas")):
-                        state["step"] = "handoff"
-                        wa_send_text(user, handoff_client(state["lang"]))
-                        # Creación de Deal básico aunque sea solo handoff
-                        try:
-                            if state.get("hs_contact_id"):
-                                hs_create_deal(state["hs_contact_id"], state.get("service_type") or "general",
-                                               state.get("city") or "", state.get("dates") or "", int(state.get("pax") or 0),
-                                               state.get("lang"))
-                        except Exception as e:
-                            print("HubSpot handoff deal exception:", e)
+                    if sid=="menu_6_sales" or "venta" in t or "sales" in t:
+                        state["step"]="handoff"
+                        owner_name, team = "Two Travel Advisor", "Two Travel"
+                        wa_send_text(user, handoff_client(state["lang"], owner_name, team))
                         continue
-                    wa_send_text(user, main_menu(state["lang"]))
+                    # Si no pulsó nada válido, re-muestro menú
+                    rows = [
+                        {"id":"menu_1_villas","title":"1️⃣ Villas & Casas 🏠"},
+                        {"id":"menu_2_boats","title":"2️⃣ Botes & Yates 🚤"},
+                        {"id":"menu_3_islands","title":"3️⃣ Islas Privadas 🏝️"},
+                        {"id":"menu_4_weddings","title":"4️⃣ Bodas & Eventos 💍🎉"},
+                        {"id":"menu_5_concierge","title":"5️⃣ Concierge ✨"},
+                        {"id":"menu_6_sales","title":"6️⃣ Hablar con ventas 👤"},
+                    ]
+                    wa_send_list(user, brand_header(state["lang"]),
+                                 ("Elige una opción" if is_es(state["lang"]) else "Choose an option"),
+                                 "Two Travel", rows)
                     continue
 
-                # ----------------- VILLAS / ISLAS -----------------
+                # ===== VILLAS / ISLANDS =====
                 if state["step"] == "villas_city":
-                    state["city"] = (text or "")
+                    # sel por lista
+                    city_map = {
+                        "villas_city_cartagena":"cartagena",
+                        "villas_city_medellin":"medellin",
+                        "villas_city_tulum":"tulum",
+                        "villas_city_cdmx":"cdmx",
+                    }
+                    if sel_id in city_map:
+                        state["city"] = city_map[sel_id]
+                    else:
+                        # Si eligió “Otra” o texto libre
+                        state["city"] = (text or "").strip()
                     state["step"] = "villas_dates"
-                    wa_send_text(user, q_villas_dates(state["lang"]))
+                    wa_send_text(user, "Fechas de check-in y check-out (YYYY-MM-DD):" if is_es(state["lang"])
+                                 else "Check-in and check-out dates (YYYY-MM-DD):")
                     continue
 
                 if state["step"] == "villas_dates":
-                    state["dates"] = (text or "")
+                    state["dates"] = (text or "").strip()
                     state["step"] = "villas_pax"
-                    wa_send_text(user, q_villas_pax(state["lang"]))
+                    wa_send_text(user, "¿Para cuántas personas?" if is_es(state["lang"]) else "How many guests?")
                     continue
 
                 if state["step"] == "villas_pax":
@@ -473,45 +476,64 @@ async def incoming(req: Request):
                     except:
                         state["pax"] = 0
                     state["step"] = "villas_prefs"
-                    wa_send_text(user, q_villas_prefs(state["lang"]))
+                    # preferencias → LIST
+                    rows = [
+                        {"id":"villas_pref_ocean","title":"1️⃣ Frente al mar"},
+                        {"id":"villas_pref_historic","title":"2️⃣ Centro histórico"},
+                        {"id":"villas_pref_excl","title":"3️⃣ Zona exclusiva"},
+                        {"id":"villas_pref_any","title":"4️⃣ Cualquiera / No preference"},
+                    ]
+                    wa_send_list(
+                        user, brand_header(state["lang"]),
+                        ("¿Alguna preferencia?" if is_es(state["lang"]) else "Any preference?"),
+                        "Two Travel", rows, section_title=("Preferencias" if is_es(state["lang"]) else "Preferences")
+                    )
                     continue
 
                 if state["step"] == "villas_prefs":
-                    state["prefs"] = (text or "")
+                    pref_map = {
+                        "villas_pref_ocean":"oceanfront",
+                        "villas_pref_historic":"historic center",
+                        "villas_pref_excl":"exclusive area",
+                        "villas_pref_any":"any",
+                    }
+                    if sel_id in pref_map:
+                        state["prefs"] = pref_map[sel_id]
+                    else:
+                        state["prefs"] = (text or "").strip()
 
+                    # No catálogo -> fallback
                     if not GOOGLE_SHEET_CSV_URL:
-                        wa_send_text(user, "⚠️ Aún no tengo el catálogo conectado. Te conecto con *ventas* para una cotización personalizada.")
+                        wa_send_text(user, "⚠️ Aún no tengo el catálogo conectado. ¿Te conecto con *Ventas* para cotización?")
                         state["step"] = "post_results"
                         continue
 
-                    svc = "villas" if state.get("service_type") in ("villas","islands","islas") else state.get("service_type")
-                    top = find_top(svc or "villas", (state.get("city") or ""), int(state.get("pax") or 0), (state.get("prefs") or ""), TOP_K)
+                    svc = "villas" if state.get("service_type") in ("villas","islands","islas","islands") else state.get("service_type")
+                    top = find_top(
+                        service=svc or "villas",
+                        city=(state.get("city") or ""),
+                        pax=int(state.get("pax") or 0),
+                        prefs=(state.get("prefs") or ""),
+                        top_k=TOP_K
+                    )
                     unit = "noche" if is_es(state["lang"]) else "night"
-                    wa_send_text(user, reply_topN(state["lang"], top, unit=unit))
-
-                    # Crear Deal en HubSpot con el contexto recogido
-                    try:
-                        if state.get("hs_contact_id"):
-                            hs_create_deal(state["hs_contact_id"], svc or "villas",
-                                           state.get("city") or "", state.get("dates") or "",
-                                           int(state.get("pax") or 0), state.get("lang"))
-                    except Exception as e:
-                        print("HubSpot villas deal exception:", e)
-
+                    wa_send_text(user, reply_topN(state["lang"], top, unit))
                     state["step"] = "post_results"
                     continue
 
-                # ----------------- BOATS -----------------
+                # ===== BOATS =====
                 if state["step"] == "boats_city":
-                    state["city"] = (text or "Cartagena")
+                    # Solo Cartagena
+                    state["city"] = "cartagena"
                     state["step"] = "boats_date"
-                    wa_send_text(user, q_boats_date(state["lang"]))
+                    wa_send_text(user, "¿Fecha del paseo? (YYYY-MM-DD; ¿día o noche?)" if is_es(state["lang"])
+                                 else "Trip date? (YYYY-MM-DD; day or night?)")
                     continue
 
                 if state["step"] == "boats_date":
-                    state["dates"] = (text or "")
+                    state["date"] = (text or "").strip()
                     state["step"] = "boats_pax"
-                    wa_send_text(user, q_boats_pax(state["lang"]))
+                    wa_send_text(user, "¿Número de pasajeros?" if is_es(state["lang"]) else "Number of passengers?")
                     continue
 
                 if state["step"] == "boats_pax":
@@ -520,77 +542,111 @@ async def incoming(req: Request):
                     except:
                         state["pax"] = 0
                     state["step"] = "boats_type"
-                    wa_send_text(user, q_boats_type(state["lang"]))
+                    # Tipo embarcación → LIST
+                    rows = [
+                        {"id":"boat_type_speed","title":"1️⃣ Lancha / Speedboat"},
+                        {"id":"boat_type_yacht","title":"2️⃣ Yate / Yacht"},
+                        {"id":"boat_type_cat","title":"3️⃣ Catamarán / Catamaran"},
+                    ]
+                    wa_send_list(
+                        user, brand_header(state["lang"]),
+                        ("Tipo de embarcación" if is_es(state["lang"]) else "Vessel type"),
+                        "Two Travel", rows, section_title=("Tipos" if is_es(state["lang"]) else "Types")
+                    )
                     continue
 
                 if state["step"] == "boats_type":
-                    state["prefs"] = (text or "")
+                    type_map = {
+                        "boat_type_speed":"speedboat",
+                        "boat_type_yacht":"yacht",
+                        "boat_type_cat":"catamaran",
+                    }
+                    if sel_id in type_map:
+                        state["boat_type"] = type_map[sel_id]
+                    else:
+                        state["boat_type"] = (text or "").strip()
 
                     if not GOOGLE_SHEET_CSV_URL:
-                        wa_send_text(user, "⚠️ Aún no tengo el catálogo conectado. Te conecto con *ventas* para una cotización personalizada.")
+                        wa_send_text(user, "⚠️ Aún no tengo el catálogo conectado. ¿Te conecto con *Ventas* para cotización?")
                         state["step"] = "post_results"
                         continue
 
-                    top = find_top("boats", (state.get("city") or "cartagena"),
-                                   int(state.get("pax") or 0), (state.get("prefs") or ""), TOP_K)
+                    top = find_top(
+                        service="boats",
+                        city=(state.get("city") or "cartagena"),
+                        pax=int(state.get("pax") or 0),
+                        prefs=(state.get("boat_type") or ""),
+                        top_k=TOP_K
+                    )
                     unit = "día" if is_es(state["lang"]) else "day"
-                    wa_send_text(user, reply_topN(state["lang"], top, unit=unit))
-
-                    try:
-                        if state.get("hs_contact_id"):
-                            hs_create_deal(state["hs_contact_id"], "boats",
-                                           state.get("city") or "", state.get("dates") or "",
-                                           int(state.get("pax") or 0), state.get("lang"))
-                    except Exception as e:
-                        print("HubSpot boats deal exception:", e)
-
+                    wa_send_text(user, reply_topN(state["lang"], top, unit))
                     state["step"] = "post_results"
                     continue
 
-                # ----------------- WEDDINGS -----------------
+                # ===== WEDDINGS =====
                 if state["step"] == "weddings_form":
                     state["weddings_info"] = (text or "")
-                    wa_send_text(user, r_wed_estimate(state["lang"]))
-
-                    try:
-                        if state.get("hs_contact_id"):
-                            hs_create_deal(state["hs_contact_id"], "weddings",
-                                           state.get("city") or "", state.get("dates") or "",
-                                           int(state.get("pax") or 0), state.get("lang"))
-                    except Exception as e:
-                        print("HubSpot weddings deal exception:", e)
-
+                    wa_send_text(user,
+                                 "Con esa información preparo un *estimado*. ¿Te conecto con *Weddings* para afinar propuesta y visitas?"
+                                 if is_es(state["lang"]) else
+                                 "We’ll prepare an *estimate*. Connect with *Weddings* to refine the proposal and schedule site visits?")
                     state["step"] = "post_results"
                     continue
 
-                # ----------------- CONCIERGE -----------------
+                # ===== CONCIERGE =====
                 if state["step"] == "concierge_form":
                     state["concierge_info"] = (text or "")
-                    wa_send_text(user, r_concierge(state["lang"]))
-
-                    try:
-                        if state.get("hs_contact_id"):
-                            hs_create_deal(state["hs_contact_id"], "concierge",
-                                           state.get("city") or "", state.get("dates") or "",
-                                           int(state.get("pax") or 0), state.get("lang"))
-                    except Exception as e:
-                        print("HubSpot concierge deal exception:", e)
-
+                    wa_send_text(user,
+                                 "Servicio 100% personalizado. *Desde* un estimado por persona. Ventas confirma el valor final. ¿Te conecto con Ventas?"
+                                 if is_es(state["lang"]) else
+                                 "100% personalized. *From* an estimated per-person rate. Sales confirms final pricing. Connect with Sales?")
                     state["step"] = "post_results"
                     continue
 
-                # ----------------- POST-RESULTS -----------------
+                # ===== POST-RESULTS =====
                 if state["step"] == "post_results":
-                    t = (text or "").lower()
-                    if ("otro" in t) or ("add" in t) or ("another" in t):
+                    # Botones (2): Añadir otro / Ventas
+                    wa_send_buttons(
+                        user,
+                        add_another_or_sales(state["lang"]),
+                        [
+                            {"id":"post_add","title":"1️⃣ " + ("Añadir otro" if is_es(state["lang"]) else "Add another")},
+                            {"id":"post_sales","title":"2️⃣ " + ("Conectar con Ventas" if is_es(state["lang"]) else "Connect with Sales")},
+                        ]
+                    )
+                    state["step"] = "post_results_wait"
+                    continue
+
+                if state["step"] == "post_results_wait":
+                    if sel_id == "post_add":
                         state["step"] = "menu"
-                        wa_send_text(user, main_menu(state["lang"]))
+                        # Re-mostrar menú LIST
+                        rows = [
+                            {"id":"menu_1_villas","title":"1️⃣ Villas & Casas 🏠"},
+                            {"id":"menu_2_boats","title":"2️⃣ Botes & Yates 🚤"},
+                            {"id":"menu_3_islands","title":"3️⃣ Islas Privadas 🏝️"},
+                            {"id":"menu_4_weddings","title":"4️⃣ Bodas & Eventos 💍🎉"},
+                            {"id":"menu_5_concierge","title":"5️⃣ Concierge ✨"},
+                            {"id":"menu_6_sales","title":"6️⃣ Hablar con ventas 👤"},
+                        ]
+                        wa_send_list(user, brand_header(state["lang"]),
+                                     ("Elige un servicio" if is_es(state["lang"]) else "Choose a service"),
+                                     "Two Travel", rows)
                         continue
-                    if ("venta" in t) or ("sales" in t) or ("conectar" in t) or ("connect" in t):
+                    if sel_id == "post_sales":
                         state["step"] = "handoff"
-                        wa_send_text(user, handoff_client(state["lang"]))
+                        owner_name, team = "Two Travel Advisor", "Two Travel"
+                        wa_send_text(user, handoff_client(state["lang"], owner_name, team))
                         continue
-                    wa_send_text(user, add_another_or_sales(state["lang"]))
+                    # si escribe texto, vuelvo a preguntar con botones
+                    wa_send_buttons(
+                        user,
+                        add_another_or_sales(state["lang"]),
+                        [
+                            {"id":"post_add","title":"1️⃣ " + ("Añadir otro" if is_es(state["lang"]) else "Add another")},
+                            {"id":"post_sales","title":"2️⃣ " + ("Conectar con Ventas" if is_es(state["lang"]) else "Connect with Sales")},
+                        ]
+                    )
                     continue
 
     return {"ok": True}
