@@ -55,8 +55,6 @@ def extract_text(m: dict) -> str:
             return ((inter.get("list_reply") or {}).get("title") or "").strip()
     return ""  # sticker/imagen/audio/etc.
 
-
-
 # ====== Helpers HubSpot ======
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
@@ -137,7 +135,7 @@ def find_top(service: str, city: str, pax: int, prefs: str, top_k: int = TOP_K):
     rows = load_catalog()
     if not rows:
         return []
-        
+
     def row_ok(r):
         if (r.get("service_type","").lower() != service):
             return False
@@ -174,19 +172,6 @@ def opener_bi():
     return (
         "ES: ¡Hola! Soy tu concierge virtual de TWOTRAVEL 🛎️✨. Estoy aquí para ayudarte con villas, botes, islas, bodas/eventos y concierge. ¿En qué idioma prefieres continuar?\n\n"
         "EN: Hi! I’m your TWOTRAVEL virtual concierge 🛎️✨. I can help with villas, boats, islands, weddings/events and concierge. Which language would you prefer?"
-    )
-
-def contact_capture(lang: str):
-    return (
-        "Para enviarte opciones y una cotización personalizada, necesito tus datos:\n"
-        " 📛 *Nombre completo:*\n"
-        " 📧 *Correo electrónico:*\n"
-        " _(Tu número de WhatsApp ya lo tengo guardado)_"
-        if is_es(lang) else
-        "To share options and a personalized quote, I’ll need your details:\n"
-        " 📛 *Full name:*\n"
-        " 📧 *Email address:*\n"
-        " _(I already have your WhatsApp number)_"
     )
 
 def ask_name_again(lang: str):
@@ -233,9 +218,9 @@ def r_concierge(lang):    return ("Servicio 100% personalizado. *Desde* USD esti
 def reply_topN(lang: str, items: list, unit: str = "noche"):
     if not items:
         return ("No veo opciones con esos filtros. ¿Quieres que intente con *fechas cercanas (±3 días)* o ajustar el *tamaño del grupo*?"
-                if (lang or "ES").upper().startswith("ES") else
+                if is_es(lang) else
                 "I couldn’t find matches. Try *nearby dates (±3 days)* or adjust *party size*?")
-    es = (lang or "ES").upper().startswith("ES")
+    es = is_es(lang)
     lines = []
     if es:
         lines.append(f"Estas son nuestras mejores {len(items)} opción(es) (precios *desde*):")
@@ -245,11 +230,9 @@ def reply_topN(lang: str, items: list, unit: str = "noche"):
     else:
         lines.append(f"Here are the top {len(items)} option(s) (*prices from*):")
         for r in items:
-            # 👇 usa unit también en EN
             lines.append(f"• {r.get('name')} ({r.get('capacity_max','?')} guests) — USD {r.get('price_from_usd','?')}/{unit} → {r.get('url')}")
         lines.append("Final *availability* is confirmed by our *sales* team before booking. Connect with sales?")
     return "\n".join(lines)
-
 
 def add_another_or_sales(lang: str):
     return ("¿Quieres *cotizar otro servicio* además de este?\n• *Añadir otro servicio*  \n• *Conectar con ventas*"
@@ -261,8 +244,7 @@ def handoff_client(lang: str, owner_name: str, team: str):
             if is_es(lang) else
             f"Connecting you with [{owner_name} – Sales {team}] to confirm *availability* and finalize the *booking*.")
 
-# ====== Extracción de texto y validaciones ======
-
+# ====== Prompts cortos para captura paso a paso ======
 def ask_contact(lang: str):
     return (
         "Para enviarte opciones y una cotización personalizada, necesito tus datos:\n"
@@ -275,10 +257,8 @@ def ask_contact(lang: str):
         " _(I’ll ask your email next)_"
     )
 
-
 def ask_email(lang: str):
     return "📧 *Correo electrónico:*" if is_es(lang) else "📧 *Email address:*"
-
 
 def valid_name(fullname: str) -> bool:
     return len((fullname or "").split()) >= 2
@@ -316,7 +296,6 @@ async def incoming(req: Request):
             value = change.get("value", {})
             # Estados de delivery (sent/delivered/read) → ignorar
             if value.get("statuses"):
-                # print("Status:", value.get("statuses"))
                 continue
 
             for m in value.get("messages", []):
@@ -348,7 +327,7 @@ async def incoming(req: Request):
                         continue
                     state["name"] = text
                     state["step"] = "contact_email"
-                    wa_send_text(user, ("📧 *Correo electrónico:*" if is_es(state["lang"]) else "📧 *Email address:*"))
+                    wa_send_text(user, ask_email(state["lang"]))
                     continue
 
                 # 2) Captura email
@@ -429,9 +408,23 @@ async def incoming(req: Request):
 
                 if state["step"] == "villas_prefs":
                     state["prefs"] = (text or "")
+
+                    # Si no hay catálogo configurado
+                    if not GOOGLE_SHEET_CSV_URL:
+                        wa_send_text(user, "⚠️ Aún no tengo el catálogo conectado. Te puedo conectar con *ventas* para una cotización manual.")
+                        state["step"] = "post_results"
+                        continue
+
                     svc = "villas" if state.get("service_type") in ("villas","islands","islas") else state.get("service_type")
-                    top = find_top(service=svc or "villas", city=(state.get("city") or ""), pax=int(state.get("pax") or 0), prefs=(state.get("prefs") or ""), top_k=TOP_K)
-                    wa_send_text(user, reply_topN(state["lang"], top, unit="noche"))
+                    top = find_top(
+                        service=svc or "villas",
+                        city=(state.get("city") or ""),
+                        pax=int(state.get("pax") or 0),
+                        prefs=(state.get("prefs") or ""),
+                        top_k=TOP_K
+                    )
+                    unit_villas = "noche" if is_es(state["lang"]) else "night"
+                    wa_send_text(user, reply_topN(state["lang"], top, unit=unit_villas))
                     state["step"] = "post_results"
                     continue
 
@@ -459,8 +452,22 @@ async def incoming(req: Request):
 
                 if state["step"] == "boats_type":
                     state["boat_type"] = (text or "")
-                    top = find_top(service="boats", city=(state.get("city") or "cartagena"), pax=int(state.get("pax") or 0), prefs=(state.get("boat_type") or ""), top_k=TOP_K)
-                    wa_send_text(user, reply_topN(state["lang"], top, unit="día"))
+
+                    # Si no hay catálogo configurado
+                    if not GOOGLE_SHEET_CSV_URL:
+                        wa_send_text(user, "⚠️ Aún no tengo el catálogo conectado. Te puedo conectar con *ventas* para una cotización manual.")
+                        state["step"] = "post_results"
+                        continue
+
+                    top = find_top(
+                        service="boats",
+                        city=(state.get("city") or "cartagena"),
+                        pax=int(state.get("pax") or 0),
+                        prefs=(state.get("boat_type") or ""),
+                        top_k=TOP_K
+                    )
+                    unit_boats = "día" if is_es(state["lang"]) else "day"
+                    wa_send_text(user, reply_topN(state["lang"], top, unit=unit_boats))
                     state["step"] = "post_results"
                     continue
 
@@ -485,7 +492,7 @@ async def incoming(req: Request):
                         state["step"] = "menu"
                         wa_send_text(user, main_menu(state["lang"]))
                         continue
-                    if ("venta" in t) or ("sales" in t) or ("conectar" in t) or ("connect" in t):
+                    if ("venta" in t) or ("sales" in t) or ("conectar" in t) or ("connect" in t)):
                         state["step"] = "handoff"
                         owner_name, team = "Laura", "TwoTravel"
                         wa_send_text(user, handoff_client(state["lang"], owner_name, team))
