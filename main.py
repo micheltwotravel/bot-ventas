@@ -19,7 +19,7 @@ GOOGLE_SHEET_CSV_URL  = (os.getenv("GOOGLE_SHEET_CSV_URL") or "").strip()  # CSV
 # ====== Estado simple en memoria (MVP) ======
 SESSIONS = {}  # { phone: {"lang":"ES/EN","step":"...","name":"","email":"","service_type":...} }
 
-# ====== Helpers WhatsApp ======
+# ====== WhatsApp helpers ======
 def wa_send_text(to: str, body: str):
     phone_id = (WA_PHONE_ID or "").strip()
     url = f"https://graph.facebook.com/v23.0/{phone_id}/messages"
@@ -36,7 +36,7 @@ def wa_send_text(to: str, body: str):
     r = requests.post(url, headers=headers, json=payload, timeout=20)
     print(f"WA send -> {r.status_code} to={to} len={len(body)} resp={r.text[:180]}")
     if r.status_code == 401:
-        print("⚠️ WA TOKEN INVALID/EXPIRED. Revisa WA_ACCESS_TOKEN en Render.")
+        print("⚠️ WA TOKEN INVALID/EXPIRED. Actualiza WA_ACCESS_TOKEN en Render.")
     if r.status_code == 400:
         print(f"⚠️ BAD REQUEST. phone_id={repr(phone_id)}")
     return r.status_code
@@ -55,7 +55,7 @@ def extract_text(m: dict) -> str:
             return ((inter.get("list_reply") or {}).get("title") or "").strip()
     return ""  # sticker/imagen/audio/etc.
 
-# ====== Helpers HubSpot ======
+# ====== HubSpot helpers ======
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 def hubspot_upsert_contact(name: str, email: str, phone: str, lang: str):
@@ -99,7 +99,7 @@ def hubspot_upsert_contact(name: str, email: str, phone: str, lang: str):
             "properties": ["email"]
         }
         s = requests.post(search_url, headers=headers, json=payload, timeout=20)
-        if s.ok and s.json().get("results"):
+        if s.ok and (s.json().get("results") or []):
             cid = s.json()["results"][0]["id"]
             up = requests.patch(f"{base}/{cid}", headers=headers, json={"properties": props}, timeout=20)
             print("HubSpot update:", up.status_code, up.text[:150])
@@ -108,7 +108,7 @@ def hubspot_upsert_contact(name: str, email: str, phone: str, lang: str):
     print("HubSpot upsert error:", r.status_code, r.text[:200])
     return False
 
-# ====== Helpers Google Sheet ======
+# ====== Catálogo (Google Sheet CSV) ======
 def load_catalog():
     if not GOOGLE_SHEET_CSV_URL:
         print("WARN: GOOGLE_SHEET_CSV_URL missing")
@@ -164,7 +164,7 @@ def find_top(service: str, city: str, pax: int, prefs: str, top_k: int = TOP_K):
     filtered.sort(key=price_val)
     return filtered[:max(1, int(top_k or 1))]
 
-# ====== Mensajes y helpers de copy (bilingüe) ======
+# ====== Copy / mensajes (bilingüe) ======
 def is_es(lang: str) -> bool:
     return (lang or "ES").upper().startswith("ES")
 
@@ -244,7 +244,7 @@ def handoff_client(lang: str, owner_name: str, team: str):
             if is_es(lang) else
             f"Connecting you with [{owner_name} – Sales {team}] to confirm *availability* and finalize the *booking*.")
 
-# ====== Prompts cortos para captura paso a paso ======
+# ====== Captura paso a paso ======
 def ask_contact(lang: str):
     return (
         "Para enviarte opciones y una cotización personalizada, necesito tus datos:\n"
@@ -260,8 +260,14 @@ def ask_contact(lang: str):
 def ask_email(lang: str):
     return "📧 *Correo electrónico:*" if is_es(lang) else "📧 *Email address:*"
 
+# Validación de nombre mejorada (ignora emojis/símbolos, exige 2 palabras reales)
 def valid_name(fullname: str) -> bool:
-    return len((fullname or "").split()) >= 2
+    tokens = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ']{2,}", (fullname or ""))
+    return len(tokens) >= 2
+
+def normalize_name(fullname: str) -> str:
+    tokens = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ']{2,}", (fullname or ""))
+    return " ".join(tokens[:3]).title()
 
 # ====== Startup logs ======
 @app.on_event("startup")
@@ -294,7 +300,8 @@ async def incoming(req: Request):
     for entry in data.get("entry", []):
         for change in entry.get("changes", []):
             value = change.get("value", {})
-            # Estados de delivery (sent/delivered/read) → ignorar
+
+            # Estados (sent/delivered/read) → ignorar
             if value.get("statuses"):
                 continue
 
@@ -303,15 +310,21 @@ async def incoming(req: Request):
                 if not user:
                     continue
 
-                text = extract_text(m)
-                state = SESSIONS.setdefault(user, {"step": "lang", "lang": "ES"})
+                # 👉 Bienvenida automática al primer mensaje (cualquier texto: "Hola", etc.)
+                if user not in SESSIONS:
+                    SESSIONS[user] = {"step": "lang", "lang": "ES"}
+                    wa_send_text(user, opener_bi())
+                    continue
 
-                # 0) Inicio: idioma
+                text = extract_text(m)
+                state = SESSIONS[user]
+
+                # 0) Idioma
                 if state["step"] == "lang":
                     low = (text or "").strip().lower()
-                    if low in ("es","español","1"):
+                    if low in ("es", "español", "1"):
                         state["lang"] = "ES"
-                    elif low in ("en","english","2"):
+                    elif low in ("en", "english", "2"):
                         state["lang"] = "EN"
                     else:
                         wa_send_text(user, opener_bi())
@@ -320,22 +333,22 @@ async def incoming(req: Request):
                     wa_send_text(user, ask_contact(state["lang"]))
                     continue
 
-                # 1) Captura nombre
+                # 1) Nombre
                 if state["step"] == "contact_name":
                     if not valid_name(text):
                         wa_send_text(user, ask_name_again(state["lang"]))
                         continue
-                    state["name"] = text
+                    state["name"] = normalize_name(text)
                     state["step"] = "contact_email"
                     wa_send_text(user, ask_email(state["lang"]))
                     continue
 
-                # 2) Captura email
+                # 2) Email
                 if state["step"] == "contact_email":
                     if not EMAIL_RE.match(text or ""):
                         wa_send_text(user, ask_email_again(state["lang"]))
                         continue
-                    state["email"] = text
+                    state["email"] = (text or "").strip()
 
                     # HubSpot upsert (no bloquea flujo si falla)
                     try:
@@ -492,7 +505,7 @@ async def incoming(req: Request):
                         state["step"] = "menu"
                         wa_send_text(user, main_menu(state["lang"]))
                         continue
-                    if ("venta" in t) or ("sales" in t) or ("conectar" in t) or ("connect" in t)):
+                    if ("venta" in t) or ("sales" in t) or ("conectar" in t) or ("connect" in t):
                         state["step"] = "handoff"
                         owner_name, team = "Laura", "TwoTravel"
                         wa_send_text(user, handoff_client(state["lang"], owner_name, team))
