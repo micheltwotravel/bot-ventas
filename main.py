@@ -10,25 +10,29 @@ VERIFY_TOKEN = (os.getenv("WA_VERIFY_TOKEN") or "").strip()
 WA_TOKEN     = (os.getenv("WA_ACCESS_TOKEN") or "").strip()
 WA_PHONE_ID  = (os.getenv("WA_PHONE_NUMBER_ID") or "").strip()
 
+# Nombre del bot (humano)
+BOT_NAME = (os.getenv("BOT_NAME") or "Luna").strip()  # p.ej. "Luna"
+
 # HubSpot
 HUBSPOT_TOKEN       = (os.getenv("HUBSPOT_TOKEN") or "").strip()
-HUBSPOT_OWNER_SOFIA = (os.getenv("HUBSPOT_OWNER_SOFIA") or "").strip()  # opcional
-HUBSPOT_OWNER_ROSS  = (os.getenv("HUBSPOT_OWNER_ROSS")  or "").strip()  # opcional
-HUBSPOT_OWNER_RAY   = (os.getenv("HUBSPOT_OWNER_RAY")   or "").strip()  # opcional
-HUBSPOT_PIPELINE_ID  = (os.getenv("HUBSPOT_PIPELINE_ID")  or "").strip()  # opcional
-HUBSPOT_DEALSTAGE_ID = (os.getenv("HUBSPOT_DEALSTAGE_ID") or "").strip()  # opcional
+HUBSPOT_OWNER_SOFIA = (os.getenv("HUBSPOT_OWNER_SOFIA") or "").strip()
+HUBSPOT_OWNER_ROSS  = (os.getenv("HUBSPOT_OWNER_ROSS")  or "").strip()
+HUBSPOT_OWNER_RAY   = (os.getenv("HUBSPOT_OWNER_RAY")   or "").strip()
+HUBSPOT_PIPELINE_ID  = (os.getenv("HUBSPOT_PIPELINE_ID")  or "").strip()
+HUBSPOT_DEALSTAGE_ID = (os.getenv("HUBSPOT_DEALSTAGE_ID") or "").strip()
 
-# Calendarios (fallback a los que pasaste)
+# Calendarios
 CAL_RAY   = (os.getenv("CAL_RAY")   or "https://meetings.hubspot.com/ray-kanevsky?uuid=280bb17d-4006-4bd1-9560-9cefa9752d5d").strip()
 CAL_SOFIA = (os.getenv("CAL_SOFIA") or "https://marketing.two.travel/meetings/sofia217").strip()
 CAL_ROSS  = (os.getenv("CAL_ROSS")  or "https://meetings.hubspot.com/ross334?uuid=68031520-950b-4493-b5ad-9cde268edbc8").strip()
 
 # Catálogo
 GOOGLE_SHEET_CSV_URL = (os.getenv("GOOGLE_SHEET_CSV_URL") or "").strip()
-TOP_K = int(os.getenv("TOP_K", "3"))  # 2 o 3
+TOP_K = int(os.getenv("TOP_K", "3"))
 
 # Estado (MVP en memoria)
-SESSIONS = {}  # { phone: {...} }
+SESSIONS = {}      # { phone: {...} }
+LAST_MSG_ID = {}   # { phone: last_msg_id }
 
 # ==================== WhatsApp helpers ====================
 def _post_graph(path: str, payload: dict):
@@ -43,9 +47,7 @@ def wa_send_text(to: str, body: str):
     return _post_graph(f"{WA_PHONE_ID}/messages", payload)
 
 def wa_send_buttons(to: str, body_text: str, buttons: list):
-    """
-    buttons: [{"id":"BTN_ID","title":"Title"}, ...]  (max 3)
-    """
+    # buttons: [{"id":"BTN_ID","title":"Title"}, ...] (max 3)
     payload = {
         "messaging_product":"whatsapp",
         "to":to,
@@ -59,9 +61,7 @@ def wa_send_buttons(to: str, body_text: str, buttons: list):
     return _post_graph(f"{WA_PHONE_ID}/messages", payload)
 
 def wa_send_list(to: str, header_text: str, body_text: str, button_text: str, rows: list):
-    """
-    rows: [{"id":"ROW_ID","title":"Title","description":"..."}]
-    """
+    # rows: [{"id":"ROW_ID","title":"Title","description":"..."}] (1..10)
     payload = {
         "messaging_product":"whatsapp",
         "to":to,
@@ -73,7 +73,7 @@ def wa_send_list(to: str, header_text: str, body_text: str, button_text: str, ro
             "footer":{"text":"Two Travel"},
             "action":{
                 "button": button_text,
-                "sections":[{"title":"Select one","rows": rows}]
+                "sections":[{"title":"Select one","rows": rows[:10]}]
             }
         }
     }
@@ -113,25 +113,14 @@ def load_catalog():
     print("Catalog rows:", len(rows))
     return rows
 
-def extract_pax(text: str) -> int:
-    if not text:
-        return 0
-    m = re.search(r'(\d{1,3})\s*(pax|persona|personas|guest|guests)?', text.lower())
-    try:
-        return int(m.group(1)) if m else 0
-    except:
-        return 0
-
 def find_top_relaxed(service: str, city: str, pax: int, prefs: str, top_k: int = TOP_K):
     rows = load_catalog()
     if not rows:
         return []
-
     service = (service or "").strip().lower()
     city    = (city or "").strip().lower()
-    prefs_l = [p.strip().lower() for p in (prefs or "").split(",") if p.strip()]
 
-    def ok(r, use_service=True, use_city=True, use_pax=True, use_prefs=True):
+    def ok(r, use_service=True, use_city=True, use_pax=True):
         if use_service and service and (r.get("service_type","").lower() != service):
             return False
         if use_city and city and (r.get("city","").lower() != city):
@@ -143,19 +132,14 @@ def find_top_relaxed(service: str, city: str, pax: int, prefs: str, top_k: int =
                 cap = 0
             if pax and cap < pax:
                 return False
-        if use_prefs and prefs_l:
-            tags = [t.strip().lower() for t in (r.get("preference_tags","") or "").split(",") if t.strip()]
-            if not any(p in tags for p in prefs_l):
-                return False
         return True
 
     attempts = [
-        dict(use_service=True, use_city=True, use_pax=True,  use_prefs=True),
-        dict(use_service=True, use_city=True, use_pax=True,  use_prefs=False),
-        dict(use_service=True, use_city=True, use_pax=False, use_prefs=False),
-        dict(use_service=True, use_city=False,use_pax=False, use_prefs=False),
-        dict(use_service=False,use_city=True, use_pax=False, use_prefs=False),
-        dict(use_service=False,use_city=False,use_pax=False, use_prefs=False),
+        dict(use_service=True, use_city=True, use_pax=True),
+        dict(use_service=True, use_city=True, use_pax=False),
+        dict(use_service=True, use_city=False,use_pax=False),
+        dict(use_service=False,use_city=True, use_pax=False),
+        dict(use_service=False,use_city=False,use_pax=False),
     ]
 
     def price_val(r):
@@ -177,8 +161,8 @@ def is_es(lang: str) -> bool:
 
 def welcome_text():
     return ("*Two Travel*\n"
-            "Bienvenido/a 🛎️✨\n\n"
-            "Elige tu idioma / Choose your language:")
+            "Antes de empezar, elige tu idioma (así te mostramos precios/fechas con claridad)."
+            "\n\nElige tu idioma / Choose your language:")
 
 def opener_buttons():
     return [
@@ -186,24 +170,32 @@ def opener_buttons():
         {"id":"LANG_EN","title":"🇺🇸 English"}
     ]
 
+def human_intro(lang):
+    if is_es(lang):
+        return f"¡Hola! Soy *{BOT_NAME}*, tu asistente de Two Travel. Estoy aquí para ayudarte a cotizar y organizar todo. ¿Cómo puedo ayudarte hoy?"
+    else:
+        return f"Hi! I’m *{BOT_NAME}*, your Two Travel assistant. I’ll help you plan and get quotes. How can I help you today?"
+
 def ask_fullname(lang):
     return ("Para iniciar tu cotización, por favor escribe tu *Nombre y Apellido*."
             if is_es(lang) else
             "To start your quote, please type your *First and Last Name*.")
 
 def ask_email(lang):
-    return ("Perfecto. Ahora tu *correo electrónico* (ej. nombre@dominio.com)."
+    return ("¿Quieres dejarnos tu correo? Puedes *saltar* y seguir."
             if is_es(lang) else
-            "Great. Now your *email address* (e.g., name@domain.com).")
+            "Would you like to add your email? You can *skip* and continue.")
 
-def polite_email_retry(lang):
-    return ("Ese correo no parece válido. ¿Puedes revisarlo? Si prefieres, seguimos y lo confirmamos luego."
-            if is_es(lang) else
-            "That email looks invalid. Could you check it? If you prefer, we can proceed and confirm later.")
+def email_buttons(lang):
+    return [
+        {"id":"EMAIL_ENTER","title":("Ingresar email" if is_es(lang) else "Enter email")},
+        {"id":"EMAIL_USE_WA","title":("Usar mi WhatsApp" if is_es(lang) else "Use my WhatsApp")},
+        {"id":"EMAIL_SKIP","title":("Saltar" if is_es(lang) else "Skip")},
+    ]
 
 def main_menu_list(lang):
     header = "Two Travel"
-    body   = ("¿Qué necesitas hoy?" if is_es(lang) else "What do you need today?")
+    body   = ("Elige una opción:" if is_es(lang) else "Choose an option:")
     rows = [
         {"id":"SVC_VILLAS",   "title":"1) Villas & Homes 🏠",         "description":("Alojamiento premium" if is_es(lang) else "Premium stays")},
         {"id":"SVC_BOATS",    "title":"2) Boats & Yachts 🚤",         "description":("Días en el mar" if is_es(lang) else "Days at sea")},
@@ -216,41 +208,97 @@ def main_menu_list(lang):
     return header, body, button, rows
 
 def city_list(lang):
-    header = "Ciudad / City"
+    header = ("Ciudad / City" if is_es(lang) else "City")
     body   = ("Elige la ciudad." if is_es(lang) else "Choose the city.")
     rows = [
-        {"id":"CITY_CARTAGENA","title":"Cartagena","description":("Colombia" if is_es(lang) else "Colombia")},
-        {"id":"CITY_MEDELLIN", "title":"Medellín","description":("Colombia" if is_es(lang) else "Colombia")},
-        {"id":"CITY_TULUM",    "title":"Tulum","description":("México" if is_es(lang) else "Mexico")},
-        {"id":"CITY_CDMX",     "title":"CDMX","description":("México" if is_es(lang) else "Mexico")},
+        {"id":"CITY_CARTAGENA","title":"Cartagena","description":"Colombia"},
+        {"id":"CITY_MEDELLIN", "title":"Medellín","description":"Colombia"},
+        {"id":"CITY_TULUM",    "title":"Tulum","description":"Mexico"},
+        {"id":"CITY_MXCITY",   "title":"Mexico City","description":"Mexico"},
     ]
     button = ("Elegir" if is_es(lang) else "Choose")
     return header, body, button, rows
 
-def ask_date(lang):
-    return ("¿En qué fecha será tu viaje/estancia? Formato *YYYY-MM-DD*.\n\n"
-            "O usa los botones:" if is_es(lang) else
-            "When will your trip/stay be? Use *YYYY-MM-DD* format.\n\n"
-            "Or use the buttons:")
+def ask_date_text(lang):
+    return ("Selecciona fecha aproximada (puedes elegir *No sé*)."
+            if is_es(lang) else
+            "Select an approximate date (you can choose *Don’t know*).")
 
 def date_buttons(lang):
     return [
         {"id":"DATE_TODAY","title":("Hoy" if is_es(lang) else "Today")},
         {"id":"DATE_TOMORROW","title":("Mañana" if is_es(lang) else "Tomorrow")},
-        {"id":"DATE_UNKNOWN","title":("Aún no sé" if is_es(lang) else "I don’t know")}
+        {"id":"DATE_UNKNOWN","title":("No sé" if is_es(lang) else "Don’t know")},
     ]
 
-def ask_pax(lang):
-    return ("¿Para cuántas *personas*? Puedes escribir 'somos 6' o elegir un rango:"
-            if is_es(lang) else
-            "How many *guests*? You may type 'we are 6' or choose a range:")
-
-def pax_buttons(lang):
-    return [
-        {"id":"PAX_2_4","title":"2–4"},
-        {"id":"PAX_5_8","title":"5–8"},
-        {"id":"PAX_9_PLUS","title":"9+"},
+def date_quick_list(lang):
+    header = ("Fechas rápidas" if is_es(lang) else "Quick dates")
+    body = ("Elige una opción:" if is_es(lang) else "Pick one:")
+    rows = [
+        {"id":"DATE_THIS_WEEKEND","title":("Este fin de semana" if is_es(lang) else "This weekend"),"description":""},
+        {"id":"DATE_NEXT_WEEKEND","title":("Próximo fin de semana" if is_es(lang) else "Next weekend"),"description":""},
+        {"id":"DATE_NEXT_MONTH","title":("Próximo mes" if is_es(lang) else "Next month"),"description":""},
+        {"id":"DATE_TBD","title":"TBD","description":("A definir" if is_es(lang) else "To be defined")},
     ]
+    button = ("Elegir" if is_es(lang) else "Choose")
+    return header, body, button, rows
+
+def pax_list(lang):
+    header = ("Personas" if is_es(lang) else "Guests")
+    body   = ("Elige un rango:" if is_es(lang) else "Choose a range:")
+    rows = [
+        {"id":"PAX_2_4","title":"2–4","description":""},
+        {"id":"PAX_5_8","title":"5–8","description":""},
+        {"id":"PAX_9_12","title":"9–12","description":""},
+        {"id":"PAX_13_16","title":"13–16","description":""},
+        {"id":"PAX_17_PLUS","title":"17+","description":""},
+    ]
+    button = ("Elegir" if is_es(lang) else "Choose")
+    return header, body, button, rows
+
+def concierge_needs_list(lang):
+    header = ("Necesidades" if is_es(lang) else "Needs")
+    body   = ("¿Qué necesitas?" if is_es(lang) else "What do you need?")
+    rows = [
+        {"id":"CC_RESERVATIONS","title":("Reservas" if is_es(lang) else "Reservations"),"description":""},
+        {"id":"CC_TRANSPORT","title":("Transporte" if is_es(lang) else "Transport"),"description":""},
+        {"id":"CC_CHEF","title":("Chef privado" if is_es(lang) else "Private chef"),"description":""},
+        {"id":"CC_SECURITY","title":("Seguridad" if is_es(lang) else "Security"),"description":""},
+        {"id":"CC_EXPERIENCES","title":("Experiencias privadas" if is_es(lang) else "Private experiences"),"description":""},
+        {"id":"CC_OTHER","title":("Otro / No estoy seguro" if is_es(lang) else "Other / Not sure"),"description":""},
+    ]
+    button = ("Elegir" if is_es(lang) else "Choose")
+    return header, body, button, rows
+
+def weddings_month_list(lang):
+    header = ("Fecha aproximada" if is_es(lang) else "Approx date")
+    body   = ("Elige un mes aproximado:" if is_es(lang) else "Choose an approximate month:")
+    # próximos 12 meses
+    today = datetime.date.today()
+    rows = []
+    for i in range(0, 12):
+        d = (today.replace(day=1) + datetime.timedelta(days=32*i))
+        d = d.replace(day=1)
+        rows.append({"id": f"WED_MONTH_{d.year}_{d.month:02d}",
+                     "title": f"{d.year}-{d.month:02d}",
+                     "description": ""})
+    rows.append({"id":"WED_MONTH_TBD","title":"TBD","description":("A definir" if is_es(lang) else "To be defined")})
+    button = ("Elegir" if is_es(lang) else "Choose")
+    return header, body, button, rows[:10]  # máx 10
+
+def weddings_guests_list(lang):
+    header = ("Invitados" if is_es(lang) else "Guests")
+    body   = ("Elige un rango de invitados:" if is_es(lang) else "Choose a guest range:")
+    rows = [
+        {"id":"WED_G_20_50","title":"20–50","description":""},
+        {"id":"WED_G_51_80","title":"51–80","description":""},
+        {"id":"WED_G_81_120","title":"81–120","description":""},
+        {"id":"WED_G_121_200","title":"121–200","description":""},
+        {"id":"WED_G_200_PLUS","title":"200+","description":""},
+        {"id":"WED_G_UNKNOWN","title":("No sé" if is_es(lang) else "Don’t know"),"description":""},
+    ]
+    button = ("Elegir" if is_es(lang) else "Choose")
+    return header, body, button, rows
 
 def reply_topN(lang: str, items: list, unit: str):
     if not items:
@@ -293,10 +341,8 @@ def hubspot_find_or_create_contact(name: str, email: str, phone: str, lang: str)
     if not HUBSPOT_TOKEN:
         print("WARN: HUBSPOT_TOKEN missing")
         return None
-
     base = "https://api.hubapi.com/crm/v3/objects/contacts"
     headers = {"Authorization": f"Bearer {HUBSPOT_TOKEN}", "Content-Type": "application/json"}
-
     cid = None
     if email:
         s = requests.post(f"{base}/search", headers=headers, json={
@@ -336,8 +382,8 @@ def owner_for_city(city: str):
         return ("Sofía", HUBSPOT_OWNER_SOFIA or None, CAL_SOFIA, "Cartagena/Tulum")
     if c in ("medellin","medellín"):
         return ("Ross", HUBSPOT_OWNER_ROSS or None, CAL_ROSS, "Medellín")
-    if c in ("mexico","méxico","cdmx"):
-        return ("Ray", HUBSPOT_OWNER_RAY or None, CAL_RAY, "CDMX")
+    if c in ("mexico city","mexico","méxico","cdmx","mxcity"):
+        return ("Ray", HUBSPOT_OWNER_RAY or None, CAL_RAY, "Mexico City")
     return ("Two Travel Team", None, CAL_SOFIA, city or "—")
 
 def hubspot_create_deal(contact_id, owner_id, title, desc):
@@ -373,24 +419,32 @@ def normalize_name(fullname: str) -> str:
     tokens = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ']{2,}", (fullname or ""))
     return " ".join(tokens[:3]).title()
 
-def parse_date_or_button(id_or_text: str, lang: str):
-    v = (id_or_text or "").strip()
-    low = v.lower()
+def parse_quick_date(choice_id: str):
     today = datetime.date.today()
-    if low in ("date_today","hoy","today"):
-        return today.isoformat()
-    if low in ("date_tomorrow","mañana","tomorrow"):
-        return (today + datetime.timedelta(days=1)).isoformat()
-    # strict YYYY-MM-DD
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
-        try:
-            datetime.date.fromisoformat(v)
-            return v
-        except:
-            return None
-    if low in ("date_unknown","aún no sé","aun no se","i don’t know","i don't know","dontknow","unknown"):
+    if choice_id == "DATE_THIS_WEEKEND":
+        # próximo sábado
+        days_ahead = (5 - today.weekday()) % 7  # 5 = Saturday
+        return (today + datetime.timedelta(days=days_ahead)).isoformat()
+    if choice_id == "DATE_NEXT_WEEKEND":
+        days_ahead = (5 - today.weekday()) % 7
+        return (today + datetime.timedelta(days=days_ahead + 7)).isoformat()
+    if choice_id == "DATE_NEXT_MONTH":
+        y = today.year + (1 if today.month == 12 else 0)
+        m = 1 if today.month == 12 else today.month + 1
+        return datetime.date(y, m, 1).isoformat()
+    if choice_id in ("DATE_TBD","DATE_UNKNOWN"):
         return ""
     return None
+
+def pax_from_id(pid: str) -> int:
+    mapping = {
+        "PAX_2_4": 4,
+        "PAX_5_8": 8,
+        "PAX_9_12": 12,
+        "PAX_13_16": 16,
+        "PAX_17_PLUS": 20,
+    }
+    return mapping.get(pid, 2)
 
 # ==================== Startup / Health ====================
 @app.on_event("startup")
@@ -430,15 +484,21 @@ async def incoming(req: Request):
                 if not user:
                     continue
 
-                # ===== Reinicio manual (hola/start/inicio/menu) =====
+                # Evitar reprocesar (reintentos webhook)
+                msg_id = m.get("id")
+                if msg_id and LAST_MSG_ID.get(user) == msg_id:
+                    continue
+                if msg_id:
+                    LAST_MSG_ID[user] = msg_id
+
+                # Reinicio manual
                 txt_raw = ((m.get("text") or {}).get("body") or "").strip().lower()
                 if txt_raw in ("hola","hello","/start","start","inicio","menu"):
                     SESSIONS[user] = {"step":"lang","lang":"ES","attempts_email":0}
-                    # 👇 Welcome como mensaje interactivo (NO texto aparte)
                     wa_send_buttons(user, welcome_text(), opener_buttons())
                     continue
 
-                # ===== Primera vez → Welcome con botones idioma =====
+                # Primera vez: solo botones de idioma
                 if user not in SESSIONS:
                     SESSIONS[user] = {"step":"lang","lang":"ES","attempts_email":0}
                     wa_send_buttons(user, welcome_text(), opener_buttons())
@@ -447,82 +507,122 @@ async def incoming(req: Request):
                 text, reply_id = extract_text_or_reply(m)
                 state = SESSIONS[user]
 
-                # ===== 0) idioma =====
+                # ===== 0) idioma (solo botones) =====
                 if state["step"] == "lang":
-                    rid = (reply_id or "").upper()
+                    rid = (reply_id or "").upper().strip()
                     low = (text or "").strip().lower()
-                    if rid == "LANG_ES" or low in ("es","español","spanish"):
+                    if rid == "LANG_ES" or "español" in low or low == "es":
                         state["lang"] = "ES"
-                    elif rid == "LANG_EN" or low in ("en","english"):
+                    elif rid == "LANG_EN" or "english" in low or low == "en":
                         state["lang"] = "EN"
                     else:
                         wa_send_buttons(user, welcome_text(), opener_buttons())
                         continue
                     state["step"] = "contact_name"
+                    wa_send_text(user, human_intro(state["lang"]))
                     wa_send_text(user, ask_fullname(state["lang"]))
                     continue
 
-                # ===== 1) Nombre =====
+                # ===== 1) Nombre (único texto libre necesario) =====
                 if state["step"] == "contact_name":
                     if not valid_name(text):
                         wa_send_text(user, ask_fullname(state["lang"]))
                         continue
                     state["name"] = normalize_name(text)
-                    state["step"] = "contact_email"
+                    state["step"] = "contact_email_choice"
                     wa_send_text(user, ask_email(state["lang"]))
+                    wa_send_buttons(user, " ", email_buttons(state["lang"]))
                     continue
 
-                # ===== 2) Email (validación suave) =====
-                if state["step"] == "contact_email":
+                # ===== 2) Email por botones (enter/usar wa/skip) =====
+                if state["step"] == "contact_email_choice":
+                    rid = (reply_id or "").upper()
+                    if rid == "EMAIL_ENTER":
+                        state["step"] = "contact_email_enter"
+                        wa_send_text(user, ("Escribe tu correo (ej. nombre@dominio.com)." if is_es(state["lang"]) else "Type your email (e.g., name@domain.com)."))
+                        continue
+                    if rid == "EMAIL_USE_WA":
+                        state["email"] = f"{user}@whatsapp"  # marcador
+                        state["contact_id"] = hubspot_find_or_create_contact(state.get("name"), state.get("email"), user, state.get("lang"))
+                        # Menú
+                        h,b,btn,rows = main_menu_list(state["lang"])
+                        wa_send_list(user, h, b, btn, rows)
+                        state["step"] = "menu"
+                        continue
+                    if rid == "EMAIL_SKIP":
+                        state["email"] = ""
+                        state["contact_id"] = hubspot_find_or_create_contact(state.get("name"), state.get("email"), user, state.get("lang"))
+                        h,b,btn,rows = main_menu_list(state["lang"])
+                        wa_send_list(user, h, b, btn, rows)
+                        state["step"] = "menu"
+                        continue
+                    wa_send_buttons(user, " ", email_buttons(state["lang"]))
+                    continue
+
+                if state["step"] == "contact_email_enter":
                     if EMAIL_RE.match(text or ""):
                         state["email"] = (text or "").strip()
-                        # crea/actualiza contacto
-                        state["contact_id"] = hubspot_find_or_create_contact(
-                            state.get("name"), state.get("email"), user, state.get("lang")
-                        )
-                        # menú
+                        state["contact_id"] = hubspot_find_or_create_contact(state.get("name"), state.get("email"), user, state.get("lang"))
                         h,b,btn,rows = main_menu_list(state["lang"])
                         wa_send_list(user, h, b, btn, rows)
                         state["step"] = "menu"
                         continue
                     else:
-                        state["attempts_email"] = state.get("attempts_email",0) + 1
-                        if state["attempts_email"] >= 2:
-                            state["email"] = (text or "").strip()
-                            state["contact_id"] = hubspot_find_or_create_contact(
-                                state.get("name"), state.get("email"), user, state.get("lang")
-                            )
-                            h,b,btn,rows = main_menu_list(state["lang"])
-                            wa_send_list(user, h, b, btn, rows)
-                            state["step"] = "menu"
-                            continue
-                        wa_send_text(user, polite_email_retry(state["lang"]))
+                        wa_send_text(user, ("Ese correo no parece válido. Inténtalo de nuevo o pulsa *Saltar*." if is_es(state["lang"]) else "That email looks invalid. Try again or press *Skip*."))
+                        wa_send_buttons(user, " ", email_buttons(state["lang"]))
+                        state["step"] = "contact_email_choice"
                         continue
 
-                # ===== 3) Menú principal =====
+                # ===== 3) Menú principal (lista) =====
                 if state["step"] == "menu":
                     rid = (reply_id or "").upper()
                     if rid in ("SVC_VILLAS","SVC_ISLANDS","SVC_BOATS","SVC_WEDDINGS","SVC_CONCIERGE","SVC_TEAM"):
                         svc = {
                             "SVC_VILLAS":"villas",
-                            "SVC_ISLANDS":"villas",  # usa mismo flujo que villas
+                            "SVC_ISLANDS":"villas",  # mismo flujo
                             "SVC_BOATS":"boats",
                             "SVC_WEDDINGS":"weddings",
                             "SVC_CONCIERGE":"concierge",
                             "SVC_TEAM":"team",
                         }[rid]
                         state["service_type"] = svc
+                        # si ya hay ciudad elegida y NO es primera vez, reutilizamos
+                        if state.get("city"):
+                            if svc in ("villas","boats"):
+                                state["step"] = "ask_date"
+                                wa_send_text(user, ask_date_text(state["lang"]))
+                                wa_send_buttons(user, " ", date_buttons(state["lang"]))
+                                h,b,btn,rows = date_quick_list(state["lang"]); wa_send_list(user, h, b, btn, rows)
+                            elif svc == "weddings":
+                                state["step"] = "wed_month"
+                                h,b,btn,rows = weddings_month_list(state["lang"]); wa_send_list(user, h, b, btn, rows)
+                            elif svc == "concierge":
+                                state["step"] = "cc_needs"
+                                h,b,btn,rows = concierge_needs_list(state["lang"]); wa_send_list(user, h, b, btn, rows)
+                            elif svc == "team":
+                                state["step"] = "handoff_city_done"
+                                owner_name, owner_id, cal_url, pretty_city = owner_for_city(state.get("city"))
+                                wa_send_text(user, handoff_text(state["lang"], owner_name, cal_url, pretty_city))
+                                contact_id = state.get("contact_id") or hubspot_find_or_create_contact(state.get("name"), state.get("email"), user, state.get("lang"))
+                                title = f"[{pretty_city}] Talk to the Team via WhatsApp"
+                                desc  = f"City: {pretty_city}\nService: {svc}\nLang: {state.get('lang')}\nSource: WhatsApp Bot"
+                                if contact_id: hubspot_create_deal(contact_id, owner_id, title, desc)
+                                wa_send_buttons(user, ("¿Qué más necesitas?" if is_es(state["lang"]) else "What else do you need?"), after_results_buttons(state["lang"]))
+                            continue
+                        # si no hay ciudad, pedirla
                         h,b,btn,rows = city_list(state["lang"])
+                        wa_send_list(user, h, b, btn, rows)
+                        # pasos según servicio
                         if svc in ("villas","boats"):
-                            wa_send_list(user, h, b, btn, rows); state["step"] = "ask_city"
+                            state["step"] = "ask_city"
                         elif svc == "weddings":
-                            wa_send_list(user, h, b, btn, rows); state["step"] = "wed_city"
+                            state["step"] = "wed_city"
                         elif svc == "concierge":
-                            wa_send_list(user, h, b, btn, rows); state["step"] = "cc_city"
+                            state["step"] = "cc_city"
                         elif svc == "team":
-                            wa_send_list(user, h, b, btn, rows); state["step"] = "handoff_city"
+                            state["step"] = "handoff_city"
                         continue
-                    # si escribió texto raro, re-muestra el menú
+                    # si nada válido, re-mostramos menú
                     h,b,btn,rows = main_menu_list(state["lang"])
                     wa_send_list(user, h, b, btn, rows)
                     continue
@@ -534,63 +634,75 @@ async def incoming(req: Request):
                         "CITY_CARTAGENA":"cartagena",
                         "CITY_MEDELLIN":"medellín",
                         "CITY_TULUM":"tulum",
-                        "CITY_CDMX":"cdmx",
+                        "CITY_MXCITY":"mexico city",
                     }
                     city = city_map.get(rid)
                     if not city:
                         h,b,btn,rows = city_list(state["lang"]); wa_send_list(user, h, b, btn, rows); continue
                     state["city"] = city
                     state["step"] = "ask_date"
-                    wa_send_text(user, ask_date(state["lang"]))
-                    wa_send_buttons(user, " ", date_buttons(state["lang"]))  # botones fecha
+                    wa_send_text(user, ask_date_text(state["lang"]))
+                    wa_send_buttons(user, " ", date_buttons(state["lang"]))
+                    h,b,btn,rows = date_quick_list(state["lang"]); wa_send_list(user, h, b, btn, rows)
                     continue
 
-                # ===== Fecha =====
+                # ===== Fecha (solo botones/listas) =====
                 if state["step"] == "ask_date":
-                    date_val = parse_date_or_button((reply_id or text), state["lang"])
-                    if date_val is None:
-                        wa_send_text(user, ask_date(state["lang"]))
-                        wa_send_buttons(user, " ", date_buttons(state["lang"]))
+                    rid = (reply_id or "").upper()
+                    # botones
+                    if rid in ("DATE_TODAY","DATE_TOMORROW","DATE_UNKNOWN"):
+                        if rid == "DATE_TODAY":
+                            date_val = datetime.date.today().isoformat()
+                        elif rid == "DATE_TOMORROW":
+                            date_val = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
+                        else:
+                            date_val = ""
+                        state["date"] = date_val
+                        # pasamos a pax (lista)
+                        h,b,btn,rows = pax_list(state["lang"]); wa_send_list(user, h, b, btn, rows)
+                        state["step"] = "ask_pax"
                         continue
-                    state["date"] = date_val  # "" si unknown
-                    state["step"] = "ask_pax"
-                    wa_send_text(user, ask_pax(state["lang"]))
-                    wa_send_buttons(user, " ", pax_buttons(state["lang"]))
+                    # lista rápida
+                    if rid in ("DATE_THIS_WEEKEND","DATE_NEXT_WEEKEND","DATE_NEXT_MONTH","DATE_TBD"):
+                        state["date"] = parse_quick_date(rid) or ""
+                        h,b,btn,rows = pax_list(state["lang"]); wa_send_list(user, h, b, btn, rows)
+                        state["step"] = "ask_pax"
+                        continue
+                    # si no, re-mostramos
+                    wa_send_buttons(user, " ", date_buttons(state["lang"]))
+                    h,b,btn,rows = date_quick_list(state["lang"]); wa_send_list(user, h, b, btn, rows)
                     continue
 
-                # ===== Pax =====
+                # ===== Pax (lista) =====
                 if state["step"] == "ask_pax":
-                    pax = 0
                     rid = (reply_id or "").upper()
-                    if rid == "PAX_2_4": pax = 4
-                    elif rid == "PAX_5_8": pax = 8
-                    elif rid == "PAX_9_PLUS": pax = 12
-                    else:
-                        pax = extract_pax(text)
-                    if pax <= 0: pax = 2
-                    state["pax"] = pax
+                    if rid.startswith("PAX_"):
+                        pax = pax_from_id(rid)
+                        state["pax"] = pax
+                        svc = state.get("service_type") or "villas"
+                        unit = ("noche" if is_es(state["lang"]) else "night") if svc=="villas" else ("día" if is_es(state["lang"]) else "day")
 
-                    svc = state.get("service_type") or "villas"
-                    unit = ("noche" if is_es(state["lang"]) else "night") if svc=="villas" else ("día" if is_es(state["lang"]) else "day")
+                        if not GOOGLE_SHEET_CSV_URL:
+                            owner_name, owner_id, cal_url, pretty_city = owner_for_city(state.get("city"))
+                            wa_send_text(user, handoff_text(state["lang"], owner_name, cal_url, pretty_city))
+                            contact_id = state.get("contact_id") or hubspot_find_or_create_contact(state.get("name"), state.get("email"), user, state.get("lang"))
+                            title = f"[{pretty_city}] {svc.title()} via WhatsApp"
+                            desc  = f"City: {pretty_city}\nDate: {state.get('date') or 'TBD'}\nPax: {pax}\nLang: {state.get('lang')}\nSource: WhatsApp Bot"
+                            if contact_id: hubspot_create_deal(contact_id, owner_id, title, desc)
+                            state["step"] = "post_results"
+                            wa_send_buttons(user, ("¿Quieres hacer algo más?" if is_es(state["lang"]) else "Anything else?"),
+                                            after_results_buttons(state["lang"]))
+                            continue
 
-                    if not GOOGLE_SHEET_CSV_URL:
-                        owner_name, owner_id, cal_url, pretty_city = owner_for_city(state.get("city"))
-                        wa_send_text(user, handoff_text(state["lang"], owner_name, cal_url, pretty_city))
-                        contact_id = state.get("contact_id") or hubspot_find_or_create_contact(state.get("name"), state.get("email"), user, state.get("lang"))
-                        title = f"[{pretty_city}] {svc.title()} via WhatsApp"
-                        desc  = f"City: {pretty_city}\nDate: {state.get('date') or 'TBD'}\nPax: {pax}\nLang: {state.get('lang')}\nSource: WhatsApp Bot"
-                        if contact_id: hubspot_create_deal(contact_id, owner_id, title, desc)
+                        top = find_top_relaxed(service=svc, city=state.get("city"), pax=pax, prefs="", top_k=TOP_K)
+                        wa_send_text(user, reply_topN(state["lang"], top, unit=unit))
+                        state["last_top"] = top
                         state["step"] = "post_results"
-                        wa_send_buttons(user, ("¿Quieres hacer algo más?" if is_es(state["lang"]) else "Anything else?"),
+                        wa_send_buttons(user, ("¿Cómo seguimos?" if is_es(state["lang"]) else "How shall we proceed?"),
                                         after_results_buttons(state["lang"]))
                         continue
-
-                    top = find_top_relaxed(service=svc, city=state.get("city"), pax=pax, prefs="", top_k=TOP_K)
-                    wa_send_text(user, reply_topN(state["lang"], top, unit=unit))
-                    state["last_top"] = top
-                    state["step"] = "post_results"
-                    wa_send_buttons(user, ("¿Cómo seguimos?" if is_es(state["lang"]) else "How shall we proceed?"),
-                                    after_results_buttons(state["lang"]))
+                    # si no eligió bien, re-mostramos
+                    h,b,btn,rows = pax_list(state["lang"]); wa_send_list(user, h, b, btn, rows)
                     continue
 
                 # ===== Weddings =====
@@ -600,30 +712,41 @@ async def incoming(req: Request):
                         "CITY_CARTAGENA":"cartagena",
                         "CITY_MEDELLIN":"medellín",
                         "CITY_TULUM":"tulum",
-                        "CITY_CDMX":"cdmx",
+                        "CITY_MXCITY":"mexico city",
                     }
                     city = city_map.get(rid)
                     if not city:
                         h,b,btn,rows = city_list(state["lang"]); wa_send_list(user, h, b, btn, rows); continue
                     state["city"] = city
-                    msg = ("Cuéntame *fecha aproximada* y *número de invitados* (ej. 2025-04, 80). Si no lo sabes aún, escribe 'TBD'."
-                           if is_es(state["lang"]) else
-                           "Tell me *approx date* and *guest count* (e.g., 2025-04, 80). If unknown, type 'TBD'.")
-                    wa_send_text(user, msg)
-                    state["step"] = "wed_info"
+                    state["step"] = "wed_month"
+                    h,b,btn,rows = weddings_month_list(state["lang"]); wa_send_list(user, h, b, btn, rows)
                     continue
 
-                if state["step"] == "wed_info":
-                    state["wed_info"] = (text or "")
-                    owner_name, owner_id, cal_url, pretty_city = owner_for_city(state.get("city"))
-                    wa_send_text(user, handoff_text(state["lang"], owner_name, cal_url, pretty_city))
-                    contact_id = state.get("contact_id") or hubspot_find_or_create_contact(state.get("name"), state.get("email"), user, state.get("lang"))
-                    title = f"[{pretty_city}] Weddings & Events via WhatsApp"
-                    desc  = f"City: {pretty_city}\nInfo: {state.get('wed_info')}\nLang: {state.get('lang')}\nSource: WhatsApp Bot"
-                    if contact_id: hubspot_create_deal(contact_id, owner_id, title, desc)
-                    state["step"] = "post_results"
-                    wa_send_buttons(user, ("¿Quieres algo más?" if is_es(state["lang"]) else "Anything else?"),
-                                    after_results_buttons(state["lang"]))
+                if state["step"] == "wed_month":
+                    rid = (reply_id or "").upper()
+                    if rid.startswith("WED_MONTH_"):
+                        state["wed_month"] = rid.replace("WED_MONTH_","")
+                        state["step"] = "wed_guests"
+                        h,b,btn,rows = weddings_guests_list(state["lang"]); wa_send_list(user, h, b, btn, rows)
+                        continue
+                    h,b,btn,rows = weddings_month_list(state["lang"]); wa_send_list(user, h, b, btn, rows)
+                    continue
+
+                if state["step"] == "wed_guests":
+                    rid = (reply_id or "").upper()
+                    if rid.startswith("WED_G_"):
+                        state["wed_guests"] = rid.replace("WED_G_","")
+                        owner_name, owner_id, cal_url, pretty_city = owner_for_city(state.get("city"))
+                        wa_send_text(user, handoff_text(state["lang"], owner_name, cal_url, pretty_city))
+                        contact_id = state.get("contact_id") or hubspot_find_or_create_contact(state.get("name"), state.get("email"), user, state.get("lang"))
+                        title = f"[{pretty_city}] Weddings & Events via WhatsApp"
+                        desc  = f"City: {pretty_city}\nMonth: {state.get('wed_month')}\nGuests: {state.get('wed_guests')}\nLang: {state.get('lang')}\nSource: WhatsApp Bot"
+                        if contact_id: hubspot_create_deal(contact_id, owner_id, title, desc)
+                        state["step"] = "post_results"
+                        wa_send_buttons(user, ("¿Quieres algo más?" if is_es(state["lang"]) else "Anything else?"),
+                                        after_results_buttons(state["lang"]))
+                        continue
+                    h,b,btn,rows = weddings_guests_list(state["lang"]); wa_send_list(user, h, b, btn, rows)
                     continue
 
                 # ===== Concierge =====
@@ -633,30 +756,31 @@ async def incoming(req: Request):
                         "CITY_CARTAGENA":"cartagena",
                         "CITY_MEDELLIN":"medellín",
                         "CITY_TULUM":"tulum",
-                        "CITY_CDMX":"cdmx",
+                        "CITY_MXCITY":"mexico city",
                     }
                     city = city_map.get(rid)
                     if not city:
                         h,b,btn,rows = city_list(state["lang"]); wa_send_list(user, h, b, btn, rows); continue
                     state["city"] = city
-                    msg = ("¿Qué necesitas? (reservas, transporte, chef, seguridad, experiencias privadas). Responde libremente."
-                           if is_es(state["lang"]) else
-                           "What do you need? (reservations, transport, private chef, security, private experiences). Reply freely.")
-                    wa_send_text(user, msg)
-                    state["step"] = "cc_info"
+                    state["step"] = "cc_needs"
+                    h,b,btn,rows = concierge_needs_list(state["lang"]); wa_send_list(user, h, b, btn, rows)
                     continue
 
-                if state["step"] == "cc_info":
-                    state["cc_info"] = (text or "")
-                    owner_name, owner_id, cal_url, pretty_city = owner_for_city(state.get("city"))
-                    wa_send_text(user, handoff_text(state["lang"], owner_name, cal_url, pretty_city))
-                    contact_id = state.get("contact_id") or hubspot_find_or_create_contact(state.get("name"), state.get("email"), user, state.get("lang"))
-                    title = f"[{pretty_city}] Concierge via WhatsApp"
-                    desc  = f"City: {pretty_city}\nRequest: {state.get('cc_info')}\nLang: {state.get('lang')}\nSource: WhatsApp Bot"
-                    if contact_id: hubspot_create_deal(contact_id, owner_id, title, desc)
-                    state["step"] = "post_results"
-                    wa_send_buttons(user, ("¿Algo más?" if is_es(state["lang"]) else "Anything else?"),
-                                    after_results_buttons(state["lang"]))
+                if state["step"] == "cc_needs":
+                    rid = (reply_id or "").upper()
+                    if rid.startswith("CC_"):
+                        state["cc_need"] = rid
+                        owner_name, owner_id, cal_url, pretty_city = owner_for_city(state.get("city"))
+                        wa_send_text(user, handoff_text(state["lang"], owner_name, cal_url, pretty_city))
+                        contact_id = state.get("contact_id") or hubspot_find_or_create_contact(state.get("name"), state.get("email"), user, state.get("lang"))
+                        title = f"[{pretty_city}] Concierge via WhatsApp"
+                        desc  = f"City: {pretty_city}\nNeed: {state.get('cc_need')}\nLang: {state.get('lang')}\nSource: WhatsApp Bot"
+                        if contact_id: hubspot_create_deal(contact_id, owner_id, title, desc)
+                        state["step"] = "post_results"
+                        wa_send_buttons(user, ("¿Algo más?" if is_es(state["lang"]) else "Anything else?"),
+                                        after_results_buttons(state["lang"]))
+                        continue
+                    h,b,btn,rows = concierge_needs_list(state["lang"]); wa_send_list(user, h, b, btn, rows)
                     continue
 
                 # ===== Handoff directo (TEAM) =====
@@ -666,13 +790,16 @@ async def incoming(req: Request):
                         "CITY_CARTAGENA":"cartagena",
                         "CITY_MEDELLIN":"medellín",
                         "CITY_TULUM":"tulum",
-                        "CITY_CDMX":"cdmx",
+                        "CITY_MXCITY":"mexico city",
                     }
                     city = city_map.get(rid)
                     if not city:
                         h,b,btn,rows = city_list(state["lang"]); wa_send_list(user, h, b, btn, rows); continue
                     state["city"] = city
-                    owner_name, owner_id, cal_url, pretty_city = owner_for_city(city)
+                    state["step"] = "handoff_city_done"
+
+                if state["step"] == "handoff_city_done":
+                    owner_name, owner_id, cal_url, pretty_city = owner_for_city(state.get("city"))
                     wa_send_text(user, handoff_text(state["lang"], owner_name, cal_url, pretty_city))
                     contact_id = state.get("contact_id") or hubspot_find_or_create_contact(state.get("name"), state.get("email"), user, state.get("lang"))
                     title = f"[{pretty_city}] Talk to the Team via WhatsApp"
@@ -690,11 +817,25 @@ async def incoming(req: Request):
                 if state["step"] == "post_results":
                     rid = (reply_id or "").upper()
                     if rid == "POST_ADD_SERVICE":
+                        # NO volvemos a preguntar ciudad: reusar state["city"]
                         state["step"] = "menu"
                         h,b,btn,rows = main_menu_list(state["lang"]); wa_send_list(user, h, b, btn, rows); continue
                     if rid == "POST_TALK_TEAM":
-                        state["step"] = "handoff_city"
-                        h,b,btn,rows = city_list(state["lang"]); wa_send_list(user, h, b, btn, rows); continue
+                        if state.get("city"):
+                            state["step"] = "handoff_city_done"
+                            # cae al flujo de handoff con ciudad ya elegida
+                            owner_name, owner_id, cal_url, pretty_city = owner_for_city(state.get("city"))
+                            wa_send_text(user, handoff_text(state["lang"], owner_name, cal_url, pretty_city))
+                            contact_id = state.get("contact_id") or hubspot_find_or_create_contact(state.get("name"), state.get("email"), user, state.get("lang"))
+                            title = f"[{pretty_city}] Talk to the Team via WhatsApp"
+                            desc  = f"City: {pretty_city}\nService: {state.get('service_type') or 'N/A'}\nDate: {state.get('date') or 'TBD'}\nPax: {state.get('pax') or 'TBD'}\nLang: {state.get('lang')}\nSource: WhatsApp Bot"
+                            if contact_id: hubspot_create_deal(contact_id, owner_id, title, desc)
+                            wa_send_buttons(user, ("¿Qué más necesitas?" if is_es(state["lang"]) else "What else do you need?"),
+                                            after_results_buttons(state["lang"]))
+                        else:
+                            state["step"] = "handoff_city"
+                            h,b,btn,rows = city_list(state["lang"]); wa_send_list(user, h, b, btn, rows)
+                        continue
                     if rid == "POST_MENU":
                         state["step"] = "menu"
                         h,b,btn,rows = main_menu_list(state["lang"]); wa_send_list(user, h, b, btn, rows); continue
