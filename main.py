@@ -573,28 +573,28 @@ def pax_list(lang):
             if is_es(lang) else
             "How many guests will join this trip?")
     rows = [
-        {"id":"PAX_4","title":"2–4","description":""},
-        {"id":"PAX_8","title":"5–8","description":""},
-        {"id":"PAX_12","title":"9–12","description":""},
-        {"id":"PAX_16","title":"13–16","description":""},
-        {"id":"PAX_20","title":"17+","description":""},
+        {"id":"PAX_5",  "title":"1–5",   "description":""},
+        {"id":"PAX_10", "title":"5–10",  "description":""},
+        {"id":"PAX_20", "title":"10–20", "description":""},
+        {"id":"PAX_21", "title":"20+",   "description":""},
     ]
     button = ("Elegir" if is_es(lang) else "Choose")
     return header, body, button, rows
+
 
 def weddings_guests_list(lang):
     header = ("Invitados" if is_es(lang) else "Guests")
     body   = ("Elige un rango de invitados:" if is_es(lang) else "Choose a guest range:")
     rows = [
-        {"id":"WED_PAX_50","title":"20–50","description":""},
-        {"id":"WED_PAX_80","title":"51–80","description":""},
-        {"id":"WED_PAX_120","title":"81–120","description":""},
-        {"id":"WED_PAX_200","title":"121–200","description":""},
-        {"id":"WED_PAX_300","title":"200+","description":""},
+        {"id":"WED_PAX_50", "title":"1–50","description":""},
+        {"id":"WED_PAX_100","title":"50–100","description":""},
+        {"id":"WED_PAX_200","title":"100–200","description":""},
+        {"id":"WED_PAX_201","title":"200+","description":""},
         {"id":"WED_PAX_UNK","title":("No sé" if is_es(lang) else "Don’t know"),"description":""},
     ]
     button = ("Elegir" if is_es(lang) else "Choose")
     return header, body, button, rows
+
 
 def ask_date(lang):
     return ("¿Tienes una *fecha* o *rango de fechas*?\n\n"
@@ -617,36 +617,54 @@ def format_results(lang: str, items: list, unit: str):
                 if es else
                 "I couldn’t find exact matches right now.\n\nI’ll connect you with our team for a bespoke proposal ✨.")
 
-    lines = []
+    out = []
     if es:
-        lines.append(f"Aquí están las mejores {len(items)} opciones:\n")
+        out.append(f"Aquí están las mejores {len(items)} opciones:\n")
         for r in items:
-            desc = r.get("description_es") or r.get("description_en") or ""
-            why  = r.get("why_pick_es") or r.get("why_pick_en") or ""
+            name  = r.get("name") or ""
             price = r.get("price_from_usd","?")
-            lines.append(
-                f"• *{r.get('name')}*\n"
-                f"— Precio aprox.: USD {price}/{unit}\n"
-                f"{desc}\n"
-                f"✨ {why}\n"
-                f"→ {r.get('url_page')}\n"
-            )
-        lines.append("La disponibilidad real se confirma con nuestro equipo antes de reservar.")
+            desc  = r.get("description_es") or r.get("description_en") or ""
+            why   = r.get("why_pick_es") or r.get("why_pick_en") or ""
+            url   = r.get("url_page") or ""
+
+            out.append(f"• *{name}*")
+            out.append("")  # espacio
+            out.append(f"— Precio aprox.: USD {price}/{unit}")
+            out.append("")  # espacio
+            if desc:
+                out.append(desc)
+                out.append("")  # espacio
+            if why:
+                out.append(f"✨ {why}")
+                out.append("")  # espacio
+            out.append(f"→ {url}")
+            out.append("")  # espacio extra entre opciones
+
+        out.append("La disponibilidad real se confirma con nuestro equipo antes de reservar.")
     else:
-        lines.append(f"Here are the top {len(items)} options:\n")
+        out.append(f"Here are the top {len(items)} options:\n")
         for r in items:
-            desc = r.get("description_en") or r.get("description_es") or ""
-            why  = r.get("why_pick_en") or r.get("why_pick_es") or ""
+            name  = r.get("name") or ""
             price = r.get("price_from_usd","?")
-            lines.append(
-                f"• *{r.get('name')}*\n"
-                f"— Approx. price: USD {price}/{unit}\n"
-                f"{desc}\n"
-                f"✨ {why}\n"
-                f"→ {r.get('url_page')}\n"
-            )
-        lines.append("Final availability is confirmed by our team before booking.")
-    return "\n".join(lines)
+            desc  = r.get("description_en") or r.get("description_es") or ""
+            why   = r.get("why_pick_en") or r.get("why_pick_es") or ""
+            url   = r.get("url_page") or ""
+
+            out.append(f"• *{name}*")
+            out.append("")
+            out.append(f"— Approx. price: USD {price}/{unit}")
+            out.append("")
+            if desc:
+                out.append(desc)
+                out.append("")
+            if why:
+                out.append(f"✨ {why}")
+                out.append("")
+            out.append(f"→ {url}")
+            out.append("")
+
+        out.append("Final availability is confirmed by our team before booking.")
+    return "\n".join(out)
 
 
 def after_results_buttons(lang):
@@ -931,11 +949,42 @@ async def incoming(req: Request):
 
                         # --- ISLANDS: seleccionar tamaño
                         if state["service_type"] == "islands":
-                            state["step"] = "island_cat"
-                            h,b,btn,rows = island_categories(state["lang"])
-                            wa_send_list(user, h, b, btn, rows)
-                            SESSIONS[user] = state
-                            continue
+                            top = filter_catalog("islands", state.get("city"), 0, None)
+                            unit = "noche" if is_es(state["lang"]) else "night"
+                            state["last_top"] = top
+                            append_history(state, "islands")
+
+                            wa_send_text(user, format_results(state["lang"], top, unit))
+
+                            owner_name, owner_id, cal_url, pretty_city, wa_num = owner_for_city(state.get("city"))
+                            notify_sales("Lead Islands", state, user, cal_url=cal_url, owner_name=owner_name, pretty_city=pretty_city)
+
+                            if not top:
+                                client_email = state.get("email") or "—"
+                                client_date  = state.get("date") or ("por definir" if is_es(state["lang"]) else "TBD")
+                                if is_es(state["lang"]):
+                                    summary = (f"Hola {owner_name}, soy {state.get('name') or '—'}.\n"
+                                               f"Busco *isla* en *{pretty_city}*.\n"
+                                               f"Date: {client_date}\nEmail: {client_email}\n"
+                                               f"Could you share options?\nWhatsApp: {user}")
+                                else:
+                                    summary = (f"Hi {owner_name}, this is {state.get('name') or '—'}.\n"
+                                               f"Looking for an *island* in *{pretty_city}*.\n"
+                                               f"Date: {client_date}\nEmail: {client_email}\n"
+                                               f"Could you share options?\nWhatsApp: {user}")
+                                wa_link = f"https://wa.me/{wa_num.replace('+','')}?text=" + urllib.parse.quote(summary)
+                                wa_send_text(user, handoff_text(state["lang"], owner_name, wa_link, pretty_city, cal_url))
+
+                        state["step"] = "post_results"
+                        wa_send_buttons(
+                            user,
+                            ("¿Cómo podemos seguir ayudándote?" if is_es(state["lang"]) else "How can we keep helping?"),
+                            after_results_buttons(state["lang"])
+                        )
+                        SESSIONS[user] = state
+                        continue
+                                        
+                           
 
                         # --- WEDDINGS: rango de invitados
                         if state["service_type"] == "weddings":
@@ -1128,7 +1177,7 @@ async def incoming(req: Request):
                 # ===== 5d) WEDDINGS → invitados => FECHA => resultados =====
                 if state["step"] == "wed_guests":
                     rid = (reply_id or "").upper()
-                    if rid not in ("WED_PAX_50","WED_PAX_80","WED_PAX_120","WED_PAX_200","WED_PAX_300","WED_PAX_UNK"):
+                    if rid not in ("WED_PAX_50","WED_PAX_100","WED_PAX_200","WED_PAX_201","WED_PAX_UNK"):
                         h,b,btn,rows = weddings_guests_list(state["lang"])
                         wa_send_list(user, h, b, btn, rows)
                         SESSIONS[user] = state
