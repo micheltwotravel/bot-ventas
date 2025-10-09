@@ -1,4 +1,4 @@
-# ==================== IMPORTS ====================
+
 import os, re, csv, io, requests, datetime, smtplib
 import urllib.parse
 import unicodedata  # << para normalizar acentos
@@ -7,18 +7,17 @@ from email.mime.text import MIMEText
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
 
-# ==================== APP ====================
 app = FastAPI()
 
-# ==================== CONFIG (ENV) ====================
+
 VERIFY_TOKEN = (os.getenv("WA_VERIFY_TOKEN") or "").strip()
 WA_TOKEN     = (os.getenv("WA_ACCESS_TOKEN") or "").strip()
 WA_PHONE_ID  = (os.getenv("WA_PHONE_NUMBER_ID") or "").strip()
 
-# Bot
+
 BOT_NAME = (os.getenv("BOT_NAME") or "Luna").strip()
 
-# HubSpot
+
 HUBSPOT_TOKEN       = (os.getenv("HUBSPOT_TOKEN") or "").strip()
 HUBSPOT_OWNER_SOFIA = (os.getenv("HUBSPOT_OWNER_SOFIA") or "").strip()
 HUBSPOT_OWNER_ROSS  = (os.getenv("HUBSPOT_OWNER_ROSS")  or "").strip()
@@ -52,7 +51,6 @@ SALES_EMAILS = [e.strip() for e in (os.getenv("SALES_EMAILS") or "michel@two.tra
 SESSIONS   = {}    # { phone: {step, lang, city, service_type, ...}}
 LAST_MSGID = {}    # evitar reprocesar el mismo mensaje WA
 
-# ==================== REGEX / VALIDACIONES ====================
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 def valid_name(fullname: str) -> bool:
@@ -77,7 +75,7 @@ def norm(s: str) -> str:
     s = re.sub(r"\s+", " ", s)
     return s
 
-# ====== HISTORIAL DE SERVICIOS CONSULTADOS ======
+
 def human_pref_label(service: str, lang: str, category_tag: str) -> str:
     es = is_es(lang)
     service = (service or "").lower()
@@ -371,7 +369,7 @@ def owner_for_city(city: str):
     pretty = city or "—"
     return ("Sofía", HUBSPOT_OWNER_SOFIA or None, CAL_SOFIA, pretty, OWNER_WA["sofia"])
 
-# ==================== CATALOGO (Google Sheet CSV) ====================
+
 def load_catalog():
     if not GOOGLE_SHEET_CSV_URL:
         print("WARN: GOOGLE_SHEET_CSV_URL missing")
@@ -419,7 +417,7 @@ def filter_catalog(service, city, pax=0, category_tag=None, top_k=TOP_K):
             pool.append(r)
 
     if not pool:
-        # Diagnóstico útil
+       
         uniq_services = sorted({canonical_service(r.get("service_type","")) for r in rows})
         uniq_cities   = sorted({canonical_city(r.get("city","")) for r in rows})
         print("CATALOG DIAG> No pool. svc asked:", svc_norm, "city asked:", city_norm)
@@ -735,14 +733,13 @@ async def incoming(req: Request):
                 if not user:
                     continue
 
-                # Idempotencia: evitar reprocesar el mismo mensaje
                 msg_id = m.get("id")
                 if msg_id and LAST_MSGID.get(user) == msg_id:
                     continue
                 if msg_id:
                     LAST_MSGID[user] = msg_id
 
-                # Reinicio manual (palabras clave)
+ 
                 txt_raw = ((m.get("text") or {}).get("body") or "").strip().lower()
                 if txt_raw in ("hola","hello","/start","start","inicio","menu"):
                     SESSIONS[user] = {"step":"lang","lang":"EN","attempts_email":0}
@@ -758,7 +755,6 @@ async def incoming(req: Request):
                 text, reply_id = extract_text_or_reply(m)
                 state = SESSIONS[user]
 
-                # ========== UNIVERSAL: captura email si el usuario lo teclea estando en step de email ==========
                 if state.get("step") in ("contact_email_choice", "contact_email_enter") and EMAIL_RE.match(text or ""):
                     state["email"] = (text or "").strip()
                     state["contact_id"] = hubspot_find_or_create_contact(
@@ -1055,13 +1051,13 @@ async def incoming(req: Request):
                             SESSIONS[user] = state
                             continue
 
-                    # Si escribió texto que no coincide con opciones, re-mostramos el menú
+                  
                     h,b,btn,rows = main_menu_list(state["lang"], state.get("city"))
                     wa_send_list(user, h, b, btn, rows)
                     SESSIONS[user] = state
                     continue
 
-                # ===== 5) VILLAS → PERSONAS =====
+             
                 if state["step"] == "villa_pax":
                     rid = (reply_id or "").upper()
                     if not rid or not rid.startswith("PAX_"):
@@ -1077,7 +1073,7 @@ async def incoming(req: Request):
                     SESSIONS[user] = state
                     continue
 
-                # ===== 6) VILLAS → HABITACIONES => FECHA => resultados =====
+   
                 if state["step"] == "villa_cat":
                     rid = (reply_id or "").upper()
                     if rid not in ("VILLA_3_6","VILLA_7_10","VILLA_11_14","VILLA_15P"):
@@ -1299,7 +1295,7 @@ async def incoming(req: Request):
                             wa_link = f"https://wa.me/{wa_num.replace('+','')}?text=" + urllib.parse.quote(summary)
                             wa_send_text(user, handoff_text(state["lang"], owner_name, wa_link, pretty_city, cal_url))
 
-                    # Después de mostrar (o no) opciones, ofrece seguir
+                   
                     state["step"] = "post_results"
                     wa_send_buttons(
                         user,
@@ -1309,7 +1305,6 @@ async def incoming(req: Request):
                     SESSIONS[user] = state
                     continue
 
-                # ===== 7) POST-RESULTS =====
                 if state["step"] == "post_results":
                     rid = (reply_id or "").upper()
 
@@ -1403,7 +1398,7 @@ async def incoming(req: Request):
                         SESSIONS[user] = state
                         continue
 
-                    # Seguimos ofreciendo acciones
+                 
                     wa_send_buttons(
                         user,
                         ("¿Quieres añadir otro servicio o hablar con el equipo?" if is_es(state["lang"]) else
