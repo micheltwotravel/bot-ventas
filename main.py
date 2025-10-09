@@ -1,7 +1,7 @@
 
 import os, re, csv, io, requests, datetime, smtplib
 import urllib.parse
-import unicodedata  # << para normalizar acentos
+import unicodedata  
 
 from email.mime.text import MIMEText
 from fastapi import FastAPI, Request
@@ -61,7 +61,6 @@ def normalize_name(fullname: str) -> str:
     tokens = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ']{2,}", (fullname or ""))
     return " ".join(tokens[:3]).title()
 
-# ==================== UTILS (normalización robusta) ====================
 def strip_accents(s: str) -> str:
     if not s:
         return ""
