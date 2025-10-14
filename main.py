@@ -49,6 +49,30 @@ LAST_MSGID = {}    # evitar reprocesar el mismo mensaje WA
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
+def looks_like_email(s: str) -> bool:
+    """Validación flexible: tolera espacios, punto final/comas y caracteres envolventes."""
+    if not s:
+        return False
+    # normaliza y limpia
+    s = (s or "").strip()
+    s = s.strip("<>«»“”\"'()[]")
+    s = re.sub(r"[\s\u200b\u200c\u200d\u2060]+", "", s)  # borra espacios visibles/invisibles
+    s = re.sub(r"[.,;:]+$", "", s)  # quita puntuación de cierre
+    s = s.lower()
+    if "@" not in s:
+        return False
+    local, _, domain = s.partition("@")
+    return bool(local) and "." in domain  # dominio con punto
+
+def clean_email(s: str) -> str:
+    """Limpia email para guardar (sin espacios ni puntuación al final)."""
+    if not s:
+        return ""
+    s = s.strip().strip("<>«»“”\"'()[]")
+    s = re.sub(r"[\s\u200b\u200c\u200d\u2060]+", "", s)
+    s = re.sub(r"[.,;:]+$", "", s)
+    return s
+
 def strip_accents(s: str) -> str:
     if not s:
         return ""
@@ -707,6 +731,19 @@ async def incoming(req: Request):
                     rid = (reply_id or "").upper()
                     low = (txt_raw or "").lower()
 
+                    # Aceptar email directo sin tocar botón
+                    if EMAIL_RE.match(txt_raw or "") or looks_like_email(txt_raw):
+                        state["email"] = clean_email(txt_raw)
+                        state["contact_id"] = hubspot_find_or_create_contact(
+                            state.get("name"), state.get("email"), user, state.get("lang")
+                        )
+                        wa_send_text(user, ("¡Perfecto! Registré tu correo. Continuemos 👉" if is_es(state["lang"]) else "Saved your email. Let’s continue 👉"))
+                        state["step"] = "city"
+                        h,b,btn,rows = city_list(state["lang"])
+                        wa_send_list(user, h, b, btn, rows)
+                        SESSIONS[user] = state
+                        continue
+
                     if rid == "EMAIL_ENTER":
                         state["step"] = "contact_email_enter"
                         wa_send_text(
@@ -732,7 +769,7 @@ async def incoming(req: Request):
                         SESSIONS[user] = state
                         continue
 
-                    if rid == "EMAIL_SKIP" or low in ("skip","saltar"):
+                    if rid == "EMAIL_SKIP" or low in ("skip","saltar","no tengo","no quiero","ninguno","prefiero whatsapp"):
                         state["email"] = ""
                         state["contact_id"] = hubspot_find_or_create_contact(
                             state.get("name"), state.get("email"), user, state.get("lang")
@@ -749,8 +786,8 @@ async def incoming(req: Request):
 
                 # ===== 2b) Email (enter) =====
                 if state["step"] == "contact_email_enter":
-                    if EMAIL_RE.match(txt_raw or ""):
-                        state["email"] = txt_raw
+                    if EMAIL_RE.match(txt_raw or "") or looks_like_email(txt_raw):
+                        state["email"] = clean_email(txt_raw)
                         state["contact_id"] = hubspot_find_or_create_contact(
                             state.get("name"), state.get("email"), user, state.get("lang")
                         )
@@ -765,7 +802,7 @@ async def incoming(req: Request):
                         continue
 
                     low = txt_raw.lower()
-                    if low in ("", "skip","saltar","si","sí","yes","ok","dale","listo"):
+                    if low in ("", "skip","saltar","si","sí","yes","ok","dale","listo","no tengo","no quiero","ninguno","prefiero whatsapp"):
                         state["email"] = ""
                         state["contact_id"] = hubspot_find_or_create_contact(
                             state.get("name"), state.get("email"), user, state.get("lang")
