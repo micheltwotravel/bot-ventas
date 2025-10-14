@@ -25,11 +25,11 @@ HUBSPOT_OWNER_RAY   = (os.getenv("HUBSPOT_OWNER_RAY")   or "").strip()
 HUBSPOT_PIPELINE_ID  = (os.getenv("HUBSPOT_PIPELINE_ID")  or "").strip()
 HUBSPOT_DEALSTAGE_ID = (os.getenv("HUBSPOT_DEALSTAGE_ID") or "").strip()
 
-# Calendario de Ray (opcional mostrar)
+# Calendarios (opcional mostrar)
 CAL_RAY   = (os.getenv("CAL_RAY")   or "https://meetings.hubspot.com/ray-kanevsky").strip()
 
-# Dueño global único (todo cae con Ray)
-OWNER_GLOBAL_NAME = "Ray Kanvesky"   # sin "Mr."
+# Dueño global único (todo cae con Rey)
+OWNER_GLOBAL_NAME = "Mr. Rey Kanvesky"  # Asegurar capitalización correcta
 OWNER_GLOBAL_WA   = (os.getenv("OWNER_GLOBAL_WA") or "+1 212 653 0000").strip()
 
 # Catálogo
@@ -48,30 +48,6 @@ SESSIONS   = {}    # { phone: {step, lang, city, service_type, ...}}
 LAST_MSGID = {}    # evitar reprocesar el mismo mensaje WA
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-
-def looks_like_email(s: str) -> bool:
-    """Validación flexible: tolera espacios, punto final/comas y caracteres envolventes."""
-    if not s:
-        return False
-    # normaliza y limpia
-    s = (s or "").strip()
-    s = s.strip("<>«»“”\"'()[]")
-    s = re.sub(r"[\s\u200b\u200c\u200d\u2060]+", "", s)  # borra espacios visibles/invisibles
-    s = re.sub(r"[.,;:]+$", "", s)  # quita puntuación de cierre
-    s = s.lower()
-    if "@" not in s:
-        return False
-    local, _, domain = s.partition("@")
-    return bool(local) and "." in domain  # dominio con punto
-
-def clean_email(s: str) -> str:
-    """Limpia email para guardar (sin espacios ni puntuación al final)."""
-    if not s:
-        return ""
-    s = s.strip().strip("<>«»“”\"'()[]")
-    s = re.sub(r"[\s\u200b\u200c\u200d\u2060]+", "", s)
-    s = re.sub(r"[.,;:]+$", "", s)
-    return s
 
 def strip_accents(s: str) -> str:
     if not s:
@@ -355,7 +331,7 @@ def hubspot_create_deal(contact_id, owner_id, title, desc):
     props = {"dealname": title, "description": desc}
     if HUBSPOT_PIPELINE_ID:  props["pipeline"]  = HUBSPOT_PIPELINE_ID
     if HUBSPOT_DEALSTAGE_ID: props["dealstage"] = HUBSPOT_DEALSTAGE_ID
-    if HUBSPOT_OWNER_RAY:    props["hubspot_owner_id"] = HUBSPOT_OWNER_RAY
+    if owner_id:             props["hubspot_owner_id"] = owner_id
     r = requests.post(base, headers=headers, json={"properties": props}, timeout=20)
     if not r.ok:
         print("HubSpot deal error:", r.status_code, r.text[:200])
@@ -585,6 +561,7 @@ def ask_date(lang):
 # ==================== Handoff: mensaje combinado ====================
 def handoff_full_message(state, owner_name, wa_num, cal_url, pretty_city):
     es = is_es(state.get("lang"))
+    svc = (state.get("service_type") or "-").title() if not es else (state.get("service_type") or "-")
     pax = state.get("pax") or ("por definir" if es else "TBD")
     date = state.get("date") or ("por definir" if es else "TBD")
     email = state.get("email") or "—"
@@ -592,9 +569,10 @@ def handoff_full_message(state, owner_name, wa_num, cal_url, pretty_city):
     pref_txt = f" ({'preferencia' if es else 'preference'}: {pref})" if pref else ""
     short_link = f"https://wa.me/{wa_click_number(wa_num)}"
 
+    # Construimos un único mensaje (sin el número del usuario)
     if es:
         lines = [
-            f"Te conecto con *{owner_name}* de Two Travel ✨",
+            f"Te conecto con *{owner_name}* (Two Travel).",
             f"📲 Escríbele aquí: {short_link}",
         ]
         if cal_url:
@@ -603,7 +581,7 @@ def handoff_full_message(state, owner_name, wa_num, cal_url, pretty_city):
             "",
             "Resumen rápido:",
             f"• Ciudad: {pretty_city}",
-            f"• Servicio: {state.get('service_type')}" + (f"{pref_txt}" if pref_txt else ""),
+            f"• Servicio: {state.get('service_type')}"+(f" {pref_txt}" if pref_txt else ""),
             f"• Pax: {pax}",
             f"• Fecha/Mes: {date}",
             f"• Email: {email}",
@@ -611,7 +589,7 @@ def handoff_full_message(state, owner_name, wa_num, cal_url, pretty_city):
         return "\n".join(lines)
     else:
         lines = [
-            f"I’m connecting you with *{owner_name}* from Two Travel ✨",
+            f"I’m connecting you with *{owner_name}* (Two Travel).",
             f"📲 Message here: {short_link}",
         ]
         if cal_url:
@@ -620,7 +598,7 @@ def handoff_full_message(state, owner_name, wa_num, cal_url, pretty_city):
             "",
             "Quick summary:",
             f"• City: {pretty_city}",
-            f"• Service: {state.get('service_type')}" + (f"{pref_txt}" if pref_txt else ""),
+            f"• Service: {state.get('service_type')}"+(f" {pref_txt}" if pref_txt else ""),
             f"• Guests: {pax}",
             f"• Date/Month: {date}",
             f"• Email: {email}",
@@ -731,19 +709,6 @@ async def incoming(req: Request):
                     rid = (reply_id or "").upper()
                     low = (txt_raw or "").lower()
 
-                    # Aceptar email directo sin tocar botón
-                    if EMAIL_RE.match(txt_raw or "") or looks_like_email(txt_raw):
-                        state["email"] = clean_email(txt_raw)
-                        state["contact_id"] = hubspot_find_or_create_contact(
-                            state.get("name"), state.get("email"), user, state.get("lang")
-                        )
-                        wa_send_text(user, ("¡Perfecto! Registré tu correo. Continuemos 👉" if is_es(state["lang"]) else "Saved your email. Let’s continue 👉"))
-                        state["step"] = "city"
-                        h,b,btn,rows = city_list(state["lang"])
-                        wa_send_list(user, h, b, btn, rows)
-                        SESSIONS[user] = state
-                        continue
-
                     if rid == "EMAIL_ENTER":
                         state["step"] = "contact_email_enter"
                         wa_send_text(
@@ -769,7 +734,7 @@ async def incoming(req: Request):
                         SESSIONS[user] = state
                         continue
 
-                    if rid == "EMAIL_SKIP" or low in ("skip","saltar","no tengo","no quiero","ninguno","prefiero whatsapp"):
+                    if rid == "EMAIL_SKIP" or low in ("skip","saltar"):
                         state["email"] = ""
                         state["contact_id"] = hubspot_find_or_create_contact(
                             state.get("name"), state.get("email"), user, state.get("lang")
@@ -786,8 +751,8 @@ async def incoming(req: Request):
 
                 # ===== 2b) Email (enter) =====
                 if state["step"] == "contact_email_enter":
-                    if EMAIL_RE.match(txt_raw or "") or looks_like_email(txt_raw):
-                        state["email"] = clean_email(txt_raw)
+                    if EMAIL_RE.match(txt_raw or ""):
+                        state["email"] = txt_raw
                         state["contact_id"] = hubspot_find_or_create_contact(
                             state.get("name"), state.get("email"), user, state.get("lang")
                         )
@@ -802,7 +767,7 @@ async def incoming(req: Request):
                         continue
 
                     low = txt_raw.lower()
-                    if low in ("", "skip","saltar","si","sí","yes","ok","dale","listo","no tengo","no quiero","ninguno","prefiero whatsapp"):
+                    if low in ("", "skip","saltar","si","sí","yes","ok","dale","listo"):
                         state["email"] = ""
                         state["contact_id"] = hubspot_find_or_create_contact(
                             state.get("name"), state.get("email"), user, state.get("lang")
@@ -899,11 +864,7 @@ async def incoming(req: Request):
                             wa_send_buttons(
                                 user,
                                 ("¿Cómo podemos seguir ayudándote?" if is_es(state["lang"]) else "How can we keep helping?"),
-                                [
-                                    {"id":"POST_ADD_SERVICE","title":("Añadir otro servicio" if is_es(state["lang"]) else "Add another service")},
-                                    {"id":"POST_TALK_TEAM","title":("Hablar con el equipo" if is_es(state["lang"]) else "Talk to the team")},
-                                    {"id":"POST_MENU","title":("Volver al menú" if is_es(state["lang"]) else "Back to menu")},
-                                ]
+                                after_results_buttons(state["lang"])
                             )
                             SESSIONS[user] = state
                             continue
@@ -944,10 +905,7 @@ async def incoming(req: Request):
                             wa_send_buttons(
                                 user,
                                 ("¿Qué más necesitas?" if is_es(state["lang"]) else "What else do you need?"),
-                                [
-                                    {"id":"POST_ADD_SERVICE","title":("Añadir otro servicio" if is_es(state["lang"]) else "Add another service")},
-                                    {"id":"POST_MENU","title":("Volver al menú" if is_es(state["lang"]) else "Back to menu")},
-                                ]
+                                after_results_buttons(state["lang"])
                             )
                             SESSIONS[user] = state
                             continue
@@ -1048,8 +1006,7 @@ async def incoming(req: Request):
 
                 # ===== FECHA (común) => resultados + handoff si vacío =====
                 if state["step"] == "date":
-                    skip_vals = {"omitir","skip","no sé","nose","tbd","na","n/a","later","después","luego","aún no","no tengo","no se","todavia no","aun no"}
-                    state["date"] = None if (txt_raw or "").strip().lower() in skip_vals else (text or "").strip()
+                    state["date"] = None if (txt_raw or "").strip().lower() in ("omitir","skip","no sé","nose","tbd","na","n/a","later","después","luego","aún no","no tengo","no se","todavia no","aun no") else (text or "").strip()
                     svc = state.get("pending_service")
 
                     if svc == "villas":
