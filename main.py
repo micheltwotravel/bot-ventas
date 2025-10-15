@@ -1,23 +1,23 @@
-
+# ==================== IMPORTS ====================
 import os, re, csv, io, requests, datetime, smtplib
 import urllib.parse
-import unicodedata  
-
+import unicodedata
 from email.mime.text import MIMEText
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
 
+# ==================== APP ====================
 app = FastAPI()
 
-
+# ==================== CONFIG (ENV) ====================
 VERIFY_TOKEN = (os.getenv("WA_VERIFY_TOKEN") or "").strip()
 WA_TOKEN     = (os.getenv("WA_ACCESS_TOKEN") or "").strip()
 WA_PHONE_ID  = (os.getenv("WA_PHONE_NUMBER_ID") or "").strip()
 
-
+# Bot
 BOT_NAME = (os.getenv("BOT_NAME") or "Luna").strip()
 
-
+# HubSpot
 HUBSPOT_TOKEN       = (os.getenv("HUBSPOT_TOKEN") or "").strip()
 HUBSPOT_OWNER_SOFIA = (os.getenv("HUBSPOT_OWNER_SOFIA") or "").strip()
 HUBSPOT_OWNER_ROSS  = (os.getenv("HUBSPOT_OWNER_ROSS")  or "").strip()
@@ -28,8 +28,9 @@ HUBSPOT_DEALSTAGE_ID = (os.getenv("HUBSPOT_DEALSTAGE_ID") or "").strip()
 # Calendarios (opcional mostrar)
 CAL_RAY   = (os.getenv("CAL_RAY")   or "https://meetings.hubspot.com/ray-kanevsky").strip()
 
-# Dueño global único (todo cae con Rey)
-OWNER_GLOBAL_NAME = "Mr. Rey Kanvesky"  # Asegurar capitalización correcta
+# Dueño global único (todo cae con Ray)
+# ✅ Corrección pedida: sin "Mr." y con nombre bien escrito.
+OWNER_GLOBAL_NAME = "Ray Kanevsky"
 OWNER_GLOBAL_WA   = (os.getenv("OWNER_GLOBAL_WA") or "+1 212 653 0000").strip()
 
 # Catálogo
@@ -47,7 +48,33 @@ SALES_EMAILS = [e.strip() for e in (os.getenv("SALES_EMAILS") or "michel@two.tra
 SESSIONS   = {}    # { phone: {step, lang, city, service_type, ...}}
 LAST_MSGID = {}    # evitar reprocesar el mismo mensaje WA
 
-EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+# ==================== Regex / Normalización robusta ====================
+# Email laxo (tolerante a mayúsculas/minúsculas)
+EMAIL_RE = re.compile(r"^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$", re.IGNORECASE)
+ZERO_WIDTH = "".join([
+    "\u200B", "\u200C", "\u200D", "\uFEFF",  # caracteres invisibles
+])
+
+def strip_invisibles(s: str) -> str:
+    if not s: return ""
+    for ch in ZERO_WIDTH:
+        s = s.replace(ch, "")
+    return s
+
+def sanitize_email_input(s: str) -> str:
+    s = strip_invisibles((s or "").strip())
+    s = re.sub(r"(?i)\b(correo|email|mail|e[-\s]?mail|mailto)\s*:\s*", "", s)
+    s = s.strip(" .;,!:)>]\"'")  # quita punticos y cierres colgantes
+    # Formato "Nombre <correo@dominio.com>"
+    m = re.search(r"<\s*([^<>@\s]+@[^<>@\s]+\.[^<>@\s]+)\s*>", s)
+    if m:
+        s = m.group(1)
+    return s
+
+def extract_first_email(s: str) -> str:
+    s = strip_invisibles(s or "")
+    m = re.search(r"([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})", s, re.IGNORECASE)
+    return m.group(1) if m else ""
 
 def strip_accents(s: str) -> str:
     if not s:
@@ -118,7 +145,6 @@ def build_history_lines(state: dict) -> str:
     hist = state.get("history") or []
     if not hist:
         return ""
-
     lines = []
     for h in hist:
         svc = h.get("service") or "-"
@@ -171,12 +197,17 @@ def canonical_service(service: str) -> str:
 def _post_graph(path: str, payload: dict):
     url = f"https://graph.facebook.com/v23.0/{path}"
     headers = {"Authorization": f"Bearer {WA_TOKEN}", "Content-Type":"application/json"}
-    r = requests.post(url, headers=headers, json=payload, timeout=25)
-    print(f"WA -> {r.status_code} {r.text[:240]}")
-    return r
+    try:
+        r = requests.post(url, headers=headers, json=payload, timeout=25)
+        print(f"WA -> {r.status_code} {r.text[:240]}")
+        return r
+    except Exception as e:
+        print("WA POST error:", e)
+        class Dummy: status_code=599; text=str(e)
+        return Dummy()
 
 def wa_send_text(to: str, body: str):
-    payload = {"messaging_product":"whatsapp","to":to,"type":"text","text":{"body":body}}
+    payload = {"messaging_product":"whatsapp","to":to,"type":"text","text":{"body":body[:4096]}}
     return _post_graph(f"{WA_PHONE_ID}/messages", payload)
 
 def wa_send_buttons(to: str, body_text: str, buttons: list):
@@ -186,24 +217,25 @@ def wa_send_buttons(to: str, body_text: str, buttons: list):
         "type":"interactive",
         "interactive":{
             "type":"button",
-            "body":{"text": body_text},
+            "body":{"text": body_text[:1024]},
             "action":{"buttons":[{"type":"reply","reply":b} for b in buttons[:3]]}
         }
     }
     return _post_graph(f"{WA_PHONE_ID}/messages", payload)
 
 def wa_send_list(to: str, header_text: str, body_text: str, button_text: str, rows: list):
+    # Librería WA limita longitudes
     payload = {
         "messaging_product":"whatsapp",
         "to":to,
         "type":"interactive",
         "interactive":{
             "type":"list",
-            "header":{"type":"text","text": header_text},
-            "body":{"text": body_text},
+            "header":{"type":"text","text": header_text[:60]},
+            "body":{"text": body_text[:1024]},
             "footer":{"text":"Two Travel"},
             "action":{
-                "button": button_text,
+                "button": button_text[:20],
                 "sections":[{"title":"Select one","rows": rows[:10]}]
             }
         }
@@ -225,6 +257,7 @@ def extract_text_or_reply(m: dict):
     if t == "button":
         btn = (m.get("button") or {})
         return ((btn.get("text") or "").strip(), None)
+    # Imagen, audio, etc. => no bloquear
     return "", None
 
 def wa_click_number(num: str) -> str:
@@ -236,7 +269,7 @@ def send_sales_email(subject: str, body: str):
         print("EMAIL [noop]>", subject, "\n", body[:600])
         return False
     msg = MIMEText(body, "plain", "utf-8")
-    msg["Subject"] = subject
+    msg["Subject"] = subject[:200]
     msg["From"] = SMTP_USER
     msg["To"] = ", ".join(SALES_EMAILS)
     try:
@@ -291,12 +324,15 @@ def hubspot_find_or_create_contact(name: str, email: str, phone: str, lang: str)
 
     cid = None
     if email:
-        s = requests.post(f"{base}/search", headers=headers, json={
-            "filterGroups":[{"filters":[{"propertyName":"email","operator":"EQ","value":email}]}],
-            "properties":["email"]
-        }, timeout=20)
-        if s.ok and s.json().get("results"):
-            cid = s.json()["results"][0]["id"]
+        try:
+            s = requests.post(f"{base}/search", headers=headers, json={
+                "filterGroups":[{"filters":[{"propertyName":"email","operator":"EQ","value":email}]}],
+                "properties":["email"]
+            }, timeout=20)
+            if s.ok and s.json().get("results"):
+                cid = s.json()["results"][0]["id"]
+        except Exception as e:
+            print("HubSpot search error:", e)
 
     props = {
         "email": email or None,
@@ -310,16 +346,23 @@ def hubspot_find_or_create_contact(name: str, email: str, phone: str, lang: str)
     }
 
     if cid:
-        up = requests.patch(f"{base}/{cid}", headers=headers, json={"properties": props}, timeout=20)
-        print("HubSpot contact update:", up.status_code, up.text[:150])
-        return cid if up.ok else None
+        try:
+            up = requests.patch(f"{base}/{cid}", headers=headers, json={"properties": props}, timeout=20)
+            print("HubSpot contact update:", up.status_code, up.text[:150])
+            return cid if up.ok else None
+        except Exception as e:
+            print("HubSpot contact update error:", e)
+            return None
 
-    r = requests.post(base, headers=headers, json={"properties": props}, timeout=20)
-    if r.status_code == 201:
-        cid = r.json().get("id")
-        print("HubSpot contact created", cid)
-        return cid
-    print("HubSpot contact error:", r.status_code, r.text[:200])
+    try:
+        r = requests.post(base, headers=headers, json={"properties": props}, timeout=20)
+        if r.status_code == 201:
+            cid = r.json().get("id")
+            print("HubSpot contact created", cid)
+            return cid
+        print("HubSpot contact error:", r.status_code, r.text[:200])
+    except Exception as e:
+        print("HubSpot contact create error:", e)
     return None
 
 def hubspot_create_deal(contact_id, owner_id, title, desc):
@@ -328,23 +371,27 @@ def hubspot_create_deal(contact_id, owner_id, title, desc):
         return None
     headers = {"Authorization": f"Bearer {HUBSPOT_TOKEN}", "Content-Type": "application/json"}
     base = "https://api.hubapi.com/crm/v3/objects/deals"
-    props = {"dealname": title, "description": desc}
+    props = {"dealname": title[:250], "description": desc[:65530]}
     if HUBSPOT_PIPELINE_ID:  props["pipeline"]  = HUBSPOT_PIPELINE_ID
     if HUBSPOT_DEALSTAGE_ID: props["dealstage"] = HUBSPOT_DEALSTAGE_ID
     if owner_id:             props["hubspot_owner_id"] = owner_id
-    r = requests.post(base, headers=headers, json={"properties": props}, timeout=20)
-    if not r.ok:
-        print("HubSpot deal error:", r.status_code, r.text[:200])
-        return None
-    deal_id = r.json().get("id")
     try:
-        assoc_url = f"https://api.hubapi.com/crm/v4/objects/deals/{deal_id}/associations/contacts/{contact_id}"
-        a = requests.put(assoc_url, headers=headers, json=[{"associationCategory":"HUBSPOT_DEFINED","associationTypeId": 3}], timeout=20)
-        print("Deal association:", a.status_code, a.text[:120])
+        r = requests.post(base, headers=headers, json={"properties": props}, timeout=20)
+        if not r.ok:
+            print("HubSpot deal error:", r.status_code, r.text[:200])
+            return None
+        deal_id = r.json().get("id")
+        try:
+            assoc_url = f"https://api.hubapi.com/crm/v4/objects/deals/{deal_id}/associations/contacts/{contact_id}"
+            a = requests.put(assoc_url, headers=headers, json=[{"associationCategory":"HUBSPOT_DEFINED","associationTypeId": 3}], timeout=20)
+            print("Deal association:", a.status_code, a.text[:120])
+        except Exception as e:
+            print("Deal association error:", e)
+        print("Deal created:", deal_id)
+        return deal_id
     except Exception as e:
-        print("Deal association error:", e)
-    print("Deal created:", deal_id)
-    return deal_id
+        print("HubSpot deal exception:", e)
+        return None
 
 def owner_for_city(city: str):
     pretty = city or "—"
@@ -358,18 +405,22 @@ def load_catalog():
     if not GOOGLE_SHEET_CSV_URL:
         print("WARN: GOOGLE_SHEET_CSV_URL missing")
         return []
-    r = requests.get(GOOGLE_SHEET_CSV_URL, timeout=30)
-    if not r.ok:
-        print("Catalog download error:", r.status_code, r.text[:200])
+    try:
+        r = requests.get(GOOGLE_SHEET_CSV_URL, timeout=30)
+        if not r.ok:
+            print("Catalog download error:", r.status_code, r.text[:200])
+            return []
+        rows = []
+        content = r.content.decode("utf-8", errors="ignore")
+        reader = csv.DictReader(io.StringIO(content))
+        for row in reader:
+            clean = {(k or "").strip(): (v or "").strip() for k, v in row.items()}
+            rows.append(clean)
+        print("Catalog rows:", len(rows))
+        return rows
+    except Exception as e:
+        print("Catalog fetch exception:", e)
         return []
-    rows = []
-    content = r.content.decode("utf-8", errors="ignore")
-    reader = csv.DictReader(io.StringIO(content))
-    for row in reader:
-        clean = {(k or "").strip(): (v or "").strip() for k, v in row.items()}
-        rows.append(clean)
-    print("Catalog rows:", len(rows))
-    return rows
 
 def _tag_hit(pref_tags: str, required_tag: str) -> bool:
     if not required_tag:
@@ -558,10 +609,54 @@ def ask_date(lang):
             "Type it like: 2026-02-15, 15/02/2026 or “May 2026”.\n\n"
             "If you don’t know yet, type *Skip*.")
 
+def after_results_buttons(lang):
+    return [
+        {"id":"POST_ADD_SERVICE","title":("Añadir otro servicio" if is_es(lang) else "Add another service")},
+        {"id":"POST_TALK_TEAM","title":("Hablar con el equipo" if is_es(lang) else "Talk to the team")},
+        {"id":"POST_MENU","title":("Volver al menú" if is_es(lang) else "Back to menu")},
+    ]
+
+def _fmt_money_usd(v: str) -> str:
+    try:
+        x = float(v or "0")
+        if x <= 0: return ""
+        return f"USD {x:,.0f}+"
+    except:
+        return ""
+
+def format_results(lang, items, unit_label):
+    es = is_es(lang)
+    if not items:
+        return ("No encontré opciones públicas ahora mismo. Te conecto con nuestro equipo para opciones privadas y personalizadas. 🤝"
+                if es else
+                "I couldn’t find public options right now. I’ll connect you with our team for private & custom options. 🤝")
+    lines = []
+    head = "Opciones encontradas:" if es else "Options found:"
+    lines.append(head)
+    for r in items[:TOP_K]:
+        name = r.get("name") or r.get("title") or "—"
+        loc  = r.get("location") or r.get("city") or ""
+        url  = r.get("url_page") or r.get("url") or r.get("link") or ""
+        price = _fmt_money_usd(r.get("price_from_usd"))
+        capacity = r.get("capacity_max") or ""
+        bits = []
+        if loc: bits.append(loc)
+        if price: bits.append(price + (f"/{unit_label}" if unit_label else ""))
+        if capacity:
+            bits.append((f"cap. {capacity}" if es else f"cap. {capacity}"))
+        sub = " • ".join([b for b in bits if b])
+        if url:
+            lines.append(f"• {name} — {sub}\n  {url}")
+        else:
+            lines.append(f"• {name} — {sub}")
+    tail = ("\n¿Quieres que te conecte con nuestro equipo para reservar o ver más opciones?" if es
+            else "\nWould you like me to connect you with our team to book or see more options?")
+    lines.append(tail)
+    return "\n".join(lines)
+
 # ==================== Handoff: mensaje combinado ====================
 def handoff_full_message(state, owner_name, wa_num, cal_url, pretty_city):
     es = is_es(state.get("lang"))
-    svc = (state.get("service_type") or "-").title() if not es else (state.get("service_type") or "-")
     pax = state.get("pax") or ("por definir" if es else "TBD")
     date = state.get("date") or ("por definir" if es else "TBD")
     email = state.get("email") or "—"
@@ -569,7 +664,6 @@ def handoff_full_message(state, owner_name, wa_num, cal_url, pretty_city):
     pref_txt = f" ({'preferencia' if es else 'preference'}: {pref})" if pref else ""
     short_link = f"https://wa.me/{wa_click_number(wa_num)}"
 
-    # Construimos un único mensaje (sin el número del usuario)
     if es:
         lines = [
             f"Te conecto con *{owner_name}* (Two Travel).",
@@ -581,7 +675,7 @@ def handoff_full_message(state, owner_name, wa_num, cal_url, pretty_city):
             "",
             "Resumen rápido:",
             f"• Ciudad: {pretty_city}",
-            f"• Servicio: {state.get('service_type')}"+(f" {pref_txt}" if pref_txt else ""),
+            f"• Servicio: {state.get('service_type')}{pref_txt}",
             f"• Pax: {pax}",
             f"• Fecha/Mes: {date}",
             f"• Email: {email}",
@@ -598,7 +692,7 @@ def handoff_full_message(state, owner_name, wa_num, cal_url, pretty_city):
             "",
             "Quick summary:",
             f"• City: {pretty_city}",
-            f"• Service: {state.get('service_type')}"+(f" {pref_txt}" if pref_txt else ""),
+            f"• Service: {state.get('service_type')}{pref_txt}",
             f"• Guests: {pax}",
             f"• Date/Month: {date}",
             f"• Email: {email}",
@@ -630,7 +724,7 @@ def root():
 
 # ==================== WEBHOOK VERIFY (GET) ====================
 @app.get("/wa-webhook")
-async def verify(req: Request): 
+async def verify(req: Request):
     mode = req.query_params.get("hub.mode")
     token = req.query_params.get("hub.verify_token")
     challenge = req.query_params.get("hub.challenge")
@@ -648,6 +742,7 @@ async def incoming(req: Request):
         for change in entry.get("changes", []):
             value = change.get("value", {})
 
+            # Ignorar callbacks de estado (delivered/read/etc.)
             if value.get("statuses"):
                 continue
 
@@ -656,20 +751,24 @@ async def incoming(req: Request):
                 if not user:
                     continue
 
+                # Evitar reprocesar
                 msg_id = m.get("id")
                 if msg_id and LAST_MSGID.get(user) == msg_id:
                     continue
                 if msg_id:
                     LAST_MSGID[user] = msg_id
 
+                # Texto / respuesta
                 text, reply_id = extract_text_or_reply(m)
                 txt_raw = (text or "").strip()
 
+                # ===== /start global =====
                 if txt_raw.lower() in ("hola","hello","/start","start","inicio","menu"):
                     SESSIONS[user] = {"step":"lang","lang":"EN","attempts_email":0}
                     wa_send_buttons(user, welcome_text(), opener_buttons())
                     continue
 
+                # Si no hay sesión, forzar idioma
                 if user not in SESSIONS:
                     SESSIONS[user] = {"step":"lang","lang":"EN","attempts_email":0}
                     wa_send_buttons(user, welcome_text(), opener_buttons())
@@ -709,6 +808,25 @@ async def incoming(req: Request):
                     rid = (reply_id or "").upper()
                     low = (txt_raw or "").lower()
 
+                    # 👇 Permitir que el usuario teclee su email aquí mismo
+                    typed_email = extract_first_email(txt_raw)
+                    if typed_email:
+                        clean = sanitize_email_input(typed_email)
+                        if EMAIL_RE.match(clean):
+                            state["email"] = clean
+                            state["contact_id"] = hubspot_find_or_create_contact(
+                                state.get("name"), state.get("email"), user, state.get("lang")
+                            )
+                            if is_es(state["lang"]):
+                                wa_send_text(user, "¡Perfecto! Registré tu correo. Continuemos 👉")
+                            else:
+                                wa_send_text(user, "Saved your email. Let’s continue 👉")
+                            state["step"] = "city"
+                            h,b,btn,rows = city_list(state["lang"])
+                            wa_send_list(user, h, b, btn, rows)
+                            SESSIONS[user] = state
+                            continue
+
                     if rid == "EMAIL_ENTER":
                         state["step"] = "contact_email_enter"
                         wa_send_text(
@@ -734,7 +852,7 @@ async def incoming(req: Request):
                         SESSIONS[user] = state
                         continue
 
-                    if rid == "EMAIL_SKIP" or low in ("skip","saltar"):
+                    if rid == "EMAIL_SKIP" or low in ("skip","saltar","omitir"):
                         state["email"] = ""
                         state["contact_id"] = hubspot_find_or_create_contact(
                             state.get("name"), state.get("email"), user, state.get("lang")
@@ -751,8 +869,16 @@ async def incoming(req: Request):
 
                 # ===== 2b) Email (enter) =====
                 if state["step"] == "contact_email_enter":
-                    if EMAIL_RE.match(txt_raw or ""):
-                        state["email"] = txt_raw
+                    # Limpieza y tolerancia máxima
+                    candidate = sanitize_email_input(txt_raw)
+                    if not EMAIL_RE.match(candidate):
+                        # Busca primer email embebido si viene con texto alrededor
+                        embedded = extract_first_email(txt_raw)
+                        if embedded:
+                            candidate = sanitize_email_input(embedded)
+
+                    if EMAIL_RE.match(candidate or ""):
+                        state["email"] = candidate
                         state["contact_id"] = hubspot_find_or_create_contact(
                             state.get("name"), state.get("email"), user, state.get("lang")
                         )
@@ -767,7 +893,7 @@ async def incoming(req: Request):
                         continue
 
                     low = txt_raw.lower()
-                    if low in ("", "skip","saltar","si","sí","yes","ok","dale","listo"):
+                    if low in ("", "skip","saltar","omitir","si","sí","yes","ok","dale","listo"):
                         state["email"] = ""
                         state["contact_id"] = hubspot_find_or_create_contact(
                             state.get("name"), state.get("email"), user, state.get("lang")
@@ -778,6 +904,7 @@ async def incoming(req: Request):
                         SESSIONS[user] = state
                         continue
 
+                    # Un solo intento fallido => no trabarse, avanzar
                     state["attempts_email"] = state.get("attempts_email", 0) + 1
                     if state["attempts_email"] >= 1:
                         state["email"] = ""
@@ -850,7 +977,6 @@ async def incoming(req: Request):
                             unit = "noche" if is_es(state["lang"]) else "night"
                             state["last_top"] = top
                             append_history(state, "islands")
-
                             wa_send_text(user, format_results(state["lang"], top, unit))
 
                             owner_name, owner_id, cal_url, pretty_city, wa_num = owner_for_city(state.get("city"))
@@ -1006,7 +1132,9 @@ async def incoming(req: Request):
 
                 # ===== FECHA (común) => resultados + handoff si vacío =====
                 if state["step"] == "date":
-                    state["date"] = None if (txt_raw or "").strip().lower() in ("omitir","skip","no sé","nose","tbd","na","n/a","later","después","luego","aún no","no tengo","no se","todavia no","aun no") else (text or "").strip()
+                    low = (txt_raw or "").strip().lower()
+                    skip_tokens = {"omitir","skip","no sé","nose","tbd","na","n/a","later","después","luego","aún no","no tengo","no se","todavia no","aun no"}
+                    state["date"] = None if low in skip_tokens else (text or "").strip()
                     svc = state.get("pending_service")
 
                     if svc == "villas":
@@ -1055,15 +1183,12 @@ async def incoming(req: Request):
                     wa_send_buttons(
                         user,
                         ("¿Cómo podemos seguir ayudándote?" if is_es(state["lang"]) else "How can we keep helping?"),
-                        [
-                            {"id":"POST_ADD_SERVICE","title":("Añadir otro servicio" if is_es(state["lang"]) else "Add another service")},
-                            {"id":"POST_TALK_TEAM","title":("Hablar con el equipo" if is_es(state["lang"]) else "Talk to the team")},
-                            {"id":"POST_MENU","title":("Volver al menú" if is_es(state["lang"]) else "Back to menu")},
-                        ]
+                        after_results_buttons(state["lang"])
                     )
                     SESSIONS[user] = state
                     continue
 
+                # ===== Post resultados =====
                 if state["step"] == "post_results":
                     rid = (reply_id or "").upper()
 
@@ -1118,11 +1243,7 @@ async def incoming(req: Request):
                         user,
                         ("¿Quieres añadir otro servicio o hablar con el equipo?" if is_es(state["lang"]) else
                          "Would you like to add another service or talk to the team?"),
-                        [
-                            {"id":"POST_ADD_SERVICE","title":("Añadir otro servicio" if is_es(state["lang"]) else "Add another service")},
-                            {"id":"POST_TALK_TEAM","title":("Hablar con el equipo" if is_es(state["lang"]) else "Talk to the team")},
-                            {"id":"POST_MENU","title":("Volver al menú" if is_es(state["lang"]) else "Back to menu")},
-                        ]
+                        after_results_buttons(state["lang"])
                     )
                     SESSIONS[user] = state
                     continue
