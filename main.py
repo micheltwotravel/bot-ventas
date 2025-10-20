@@ -893,12 +893,15 @@ async def incoming(req: Request):
                 if not user:
                     continue
 
-                # Evitar reprocesar
+                # Normalizar id del usuario (solo dígitos)
+                uid = wa_click_number(user)
+
+                # Evitar reprocesar mensajes duplicados
                 msg_id = m.get("id")
-                if msg_id and LAST_MSGID.get(user) == msg_id:
+                if msg_id and LAST_MSGID.get(uid) == msg_id:
                     continue
                 if msg_id:
-                    LAST_MSGID[user] = msg_id
+                    LAST_MSGID[uid] = msg_id
 
                 # Texto / respuesta
                 text, reply_id = extract_text_or_reply(m)
@@ -907,15 +910,24 @@ async def incoming(req: Request):
 
                 # ===== INICIO / RESTART =====
                 if low_txt in ("hola","hello","/start","start","inicio","menu"):
-                    state = {"step":"lang","lang":"EN","attempts_email":0}
-                    set_session(user, state)
-                    wa_send_buttons(user, welcome_text(), opener_buttons())
+                    state = get_session(user) or {}
+                    if not state.get("welcomed"):
+                        state.update({
+                            "step": "lang",
+                            "lang": "EN",
+                            "attempts_email": 0,
+                            "welcomed": True
+                        })
+                        set_session(user, state)
+                        wa_send_buttons(user, welcome_text(), opener_buttons())
+                    # Si ya estaba welcomed, no repetimos opener
                     continue
 
                 # ===== CARGAR SESIÓN =====
                 state = get_session(user)
                 if not state:
-                    state = {"step":"lang","lang":"EN","attempts_email":0}
+                    # Primera vez sin /start: mostramos opener una sola vez
+                    state = {"step":"lang","lang":"EN","attempts_email":0,"welcomed":True}
                     set_session(user, state)
                     wa_send_buttons(user, welcome_text(), opener_buttons())
                     continue
@@ -959,7 +971,11 @@ async def incoming(req: Request):
                             )
                             state["step"] = "city"
                             set_session(user, state)
-                            wa_send_text(user, "¡Perfecto! Registré tu correo. Continuemos 👉" if is_es(state["lang"]) else "Saved your email. Let’s continue 👉")
+                            wa_send_text(
+                                user,
+                                "¡Perfecto! Registré tu correo. Continuemos 👉" if is_es(state["lang"]) else
+                                "Saved your email. Let’s continue 👉"
+                            )
                             h,b,btn,rows = city_list(state["lang"])
                             wa_send_list(user, h, b, btn, rows)
                             continue
@@ -967,7 +983,11 @@ async def incoming(req: Request):
                     if rid == "EMAIL_ENTER":
                         state["step"] = "contact_email_enter"
                         set_session(user, state)
-                        wa_send_text(user, "Escribe tu correo (ej. nombre@dominio.com)." if is_es(state["lang"]) else "Type your email (e.g., name@domain.com).")
+                        wa_send_text(
+                            user,
+                            "Escribe tu correo (ej. nombre@dominio.com)." if is_es(state["lang"]) else
+                            "Type your email (e.g., name@domain.com)."
+                        )
                         continue
 
                     if rid == "EMAIL_USE_WA":
@@ -1010,7 +1030,11 @@ async def incoming(req: Request):
                         )
                         state["step"] = "city"
                         set_session(user, state)
-                        wa_send_text(user, "¡Perfecto! Registré tu correo. Continuemos 👉" if is_es(state["lang"]) else "Saved your email. Let’s continue 👉")
+                        wa_send_text(
+                            user,
+                            "¡Perfecto! Registré tu correo. Continuemos 👉" if is_es(state["lang"]) else
+                            "Saved your email. Let’s continue 👉"
+                        )
                         h,b,btn,rows = city_list(state["lang"])
                         wa_send_list(user, h, b, btn, rows)
                         continue
@@ -1084,7 +1108,6 @@ async def incoming(req: Request):
                         state["step"] = "post_results"
                         set_session(user, state)
                         lbl = "día" if is_es(state["lang"]) else "day"
-                        # 👉 nuevo: pasamos service_type y city para encabezado con emoji + ciudad
                         wa_send_text(user, format_results(state["lang"], top, lbl, service_type="islands", city=state["city"]))
                         owner_name, owner_id, cal_url, pretty_city, wa_num = owner_for_city(state["city"])
                         notify_sales("Lead Islands", state, user, cal_url=cal_url, owner_name=owner_name, pretty_city=pretty_city)
@@ -1113,14 +1136,12 @@ async def incoming(req: Request):
                 # ===== BOATS → categoría =====
                 if state["step"] == "boat_cat":
                     rid = (reply_id or "").upper()
-                    # Solo aceptamos las 5 opciones del menú (sin texto libre)
                     valid = ("BOAT_SPEED","BOAT_YACHT","BOAT_CAT","BOAT_ALL","BOAT_UNSURE")
                     if rid not in valid:
                         h,b,btn,rows = boat_categories(state["lang"])
                         wa_send_list(user, h, b, btn, rows)
                         continue
 
-                    # Mapeo
                     state["category_tag"] = {
                         "BOAT_SPEED":"type_speedboat",
                         "BOAT_YACHT":"type_yacht",
@@ -1201,7 +1222,6 @@ async def incoming(req: Request):
                 if state["step"] == "date":
                     skip_tokens = {"omitir","skip","no sé","nose","tbd","na","n/a","later","después","luego","aún no","no tengo","no se","todavia no","aun no"}
 
-                    # Validación fecha pasada (si el usuario sí escribió fecha)
                     if low_txt not in skip_tokens:
                         ok_future, warn_msg = _validate_future_or_warn(txt_raw, state.get("lang"))
                         if not ok_future:
@@ -1223,7 +1243,6 @@ async def incoming(req: Request):
                     state["step"] = "post_results"
                     set_session(user, state)
 
-                    # 👉 nuevo: pasamos service_type y city
                     wa_send_text(
                         user,
                         format_results(state["lang"], top, unit, service_type=svc, city=state["city"])
