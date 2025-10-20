@@ -728,26 +728,20 @@ def wa_link_with_text(phone_e164: str, text: str) -> str:
     return f"https://wa.me/{wa_click_number(phone_e164)}?text={urllib.parse.quote(text)}"
 
 def build_msg_to_ray(state: dict, owner_name="Ray", city_fallback="Cartagena"):
-    """
-    Texto prellenado para Ray. EN al inicio + explicación ES. Sin listas ni resumen.
-    """
     name = state.get("name") or "Michel"
     city = state.get("city") or city_fallback
     svc  = (state.get("service_type") or "villas").lower()
 
-    # Preferencia legible (usa tus etiquetas ya mapeadas)
     pref = human_pref_label(svc, state.get("lang") or "EN", state.get("category_tag"))
     pref_txt = f" ({pref})" if pref else ""
 
-    # Fecha si el usuario la escribió (si no, no forzar)
     d = state.get("date")
     date_txt = f" for {d}" if d else ""
 
-    # Texto final tal cual solicitaste
-    text = (f"Hi Ray, I’m {name}. "
+    # 👇 ahora sí dinámico
+    text = (f"Hi {owner_name}, I’m {name}. "
             f"Como le comentaba a Luna, estoy interesad@ en {svc} en {city}{pref_txt}{date_txt}.")
     return text
-
 
 # ==================== Handoff: mensaje combinado ====================
 def handoff_full_message(state, owner_name, wa_num, cal_url, pretty_city):
@@ -798,15 +792,6 @@ def root():
     return {"ok": True, "routes": [r.path for r in app.router.routes]}
 
 # ==================== WEBHOOK VERIFY (GET) ====================
-@app.get("/wa-webhook")
-async def verify(req: Request):
-    mode = req.query_params.get("hub.mode")
-    token = req.query_params.get("hub.verify_token")
-    challenge = req.query_params.get("hub.challenge")
-    if mode == "subscribe" and token == VERIFY_TOKEN and challenge:
-        return PlainTextResponse(challenge, status_code=200)
-    return PlainTextResponse("forbidden", status_code=403)
-
 @app.post("/wa-webhook")
 async def incoming(req: Request):
     data = await req.json()
@@ -835,9 +820,10 @@ async def incoming(req: Request):
                 # Texto / respuesta
                 text, reply_id = extract_text_or_reply(m)
                 txt_raw = (text or "").strip()
+                low_txt = txt_raw.lower()  # 👈 Fallback de texto libre
 
                 # ===== /start global =====
-                if txt_raw.lower() in ("hola","hello","/start","start","inicio","menu"):
+                if low_txt in ("hola","hello","/start","start","inicio","menu"):
                     SESSIONS[user] = {"step":"lang","lang":"EN","attempts_email":0}
                     wa_send_buttons(user, welcome_text(), opener_buttons())
                     continue
@@ -853,8 +839,7 @@ async def incoming(req: Request):
                 # ===== 0) Idioma =====
                 if state["step"] == "lang":
                     rid = (reply_id or "").upper().strip()
-                    low = txt_raw.lower()
-                    if rid == "LANG_ES" or "español" in low or low == "es":
+                    if rid == "LANG_ES" or "español" in low_txt or low_txt == "es":
                         state["lang"] = "ES"
                     else:
                         state["lang"] = "EN"
@@ -880,7 +865,6 @@ async def incoming(req: Request):
                 # ===== 2) Email (choice) =====
                 if state["step"] == "contact_email_choice":
                     rid = (reply_id or "").upper()
-                    low = (txt_raw or "").lower()
 
                     # Permitir teclear email en este paso
                     typed_email = extract_first_email(txt_raw)
@@ -911,22 +895,23 @@ async def incoming(req: Request):
                         SESSIONS[user] = state
                         continue
 
-                    if rid == "EMAIL_USE_WA" or low in ("usar whatsapp","use whatsapp"):
+                    if rid == "EMAIL_USE_WA" or low_txt in ("usar whatsapp","use whatsapp"):
                         state["email"] = f"{user}@whatsapp"
                         state["contact_id"] = hubspot_find_or_create_contact(
                             state.get("name"), state.get("email"), user, state.get("lang")
                         )
-                        if is_es(state["lang"]):
-                            wa_send_text(user, "Anoté que prefieres continuar por WhatsApp. ¡Gracias! 🙌")
-                        else:
-                            wa_send_text(user, "Noted you prefer WhatsApp. Thanks! 🙌")
+                        wa_send_text(
+                            user,
+                            "Anoté que prefieres continuar por WhatsApp. ¡Gracias! 🙌" if is_es(state["lang"])
+                            else "Noted you prefer WhatsApp. Thanks! 🙌"
+                        )
                         state["step"] = "city"
                         h,b,btn,rows = city_list(state["lang"])
                         wa_send_list(user, h, b, btn, rows)
                         SESSIONS[user] = state
                         continue
 
-                    if rid == "EMAIL_SKIP" or low in ("skip","saltar","omitir"):
+                    if rid == "EMAIL_SKIP" or low_txt in ("skip","saltar","omitir"):
                         state["email"] = ""
                         state["contact_id"] = hubspot_find_or_create_contact(
                             state.get("name"), state.get("email"), user, state.get("lang")
@@ -954,18 +939,18 @@ async def incoming(req: Request):
                         state["contact_id"] = hubspot_find_or_create_contact(
                             state.get("name"), state.get("email"), user, state.get("lang")
                         )
-                        if is_es(state["lang"]):
-                            wa_send_text(user, "¡Perfecto! Registré tu correo. Continuemos 👉")
-                        else:
-                            wa_send_text(user, "Saved your email. Let’s continue 👉")
+                        wa_send_text(
+                            user,
+                            "¡Perfecto! Registré tu correo. Continuemos 👉" if is_es(state["lang"])
+                            else "Saved your email. Let’s continue 👉"
+                        )
                         state["step"] = "city"
                         h,b,btn,rows = city_list(state["lang"])
                         wa_send_list(user, h, b, btn, rows)
                         SESSIONS[user] = state
                         continue
 
-                    low = txt_raw.lower()
-                    if low in ("", "skip","saltar","omitir","si","sí","yes","ok","dale","listo"):
+                    if low_txt in ("", "skip","saltar","omitir","si","sí","yes","ok","dale","listo"):
                         state["email"] = ""
                         state["contact_id"] = hubspot_find_or_create_contact(
                             state.get("name"), state.get("email"), user, state.get("lang")
@@ -1019,7 +1004,18 @@ async def incoming(req: Request):
                 # ===== 4) Menú (servicio) =====
                 if state["step"] == "menu":
                     rid = (reply_id or "").upper()
-                    if rid in ("SVC_VILLAS","SVC_BOATS","SVC_ISLANDS","SVC_WEDDINGS","SVC_CONCIERGE","SVC_TEAM"):
+
+                    # Fallback texto para Boats/Yachts
+                    is_boats_text = any(k in low_txt for k in [
+                        "boat","boats","yacht","yachts",
+                        "bote","botes","yate","yates",
+                        "barco","barcos","lancha","lancha rapida","lancha rápida",
+                        "catamaran","catamarán","mar","día en el mar","dia en el mar"
+                    ])
+
+                    valid_rid = rid in ("SVC_VILLAS","SVC_BOATS","SVC_ISLANDS","SVC_WEDDINGS","SVC_CONCIERGE","SVC_TEAM")
+
+                    if valid_rid or is_boats_text:
                         svc_map = {
                             "SVC_VILLAS":"villas",
                             "SVC_BOATS":"boats",
@@ -1028,7 +1024,7 @@ async def incoming(req: Request):
                             "SVC_CONCIERGE":"concierge",
                             "SVC_TEAM":"team",
                         }
-                        state["service_type"] = svc_map[rid]
+                        state["service_type"] = "boats" if is_boats_text else svc_map[rid]
 
                         if state["service_type"] == "villas":
                             state["step"] = "villa_pax"
@@ -1108,6 +1104,7 @@ async def incoming(req: Request):
                             SESSIONS[user] = state
                             continue
 
+                    # Si no hubo selección válida, re-mostramos menú
                     h,b,btn,rows = main_menu_list(state["lang"], state.get("city"))
                     wa_send_list(user, h, b, btn, rows)
                     SESSIONS[user] = state
@@ -1153,7 +1150,7 @@ async def incoming(req: Request):
                 # ===== BOATS → categoría =====
                 if state["step"] == "boat_cat":
                     rid = (reply_id or "").upper()
-                    # 🔧 Acepta también BOAT_ALL (para no filtrar por categoría)
+                    # Acepta también BOAT_ALL (para mostrar todas)
                     if rid not in ("BOAT_SPEED","BOAT_YACHT","BOAT_CAT","BOAT_ALL"):
                         h,b,btn,rows = boat_categories(state["lang"])
                         wa_send_list(user, h, b, btn, rows)
@@ -1161,7 +1158,7 @@ async def incoming(req: Request):
                         continue
 
                     if rid == "BOAT_ALL":
-                        state["category_tag"] = None  # mostrar todas las categorías
+                        state["category_tag"] = None
                     else:
                         state["category_tag"] = {
                             "BOAT_SPEED":"type_speedboat",
@@ -1209,11 +1206,10 @@ async def incoming(req: Request):
 
                 # ===== FECHA (común) => validación + resultados / handoff =====
                 if state["step"] == "date":
-                    low = (txt_raw or "").strip().lower()
                     skip_tokens = {"omitir","skip","no sé","nose","tbd","na","n/a","later","después","luego","aún no","no tengo","no se","todavia no","aun no"}
 
-                    # 🔧 Validación de fecha pasada (si el usuario sí escribió una fecha)
-                    if low not in skip_tokens:
+                    # Validación fecha pasada (si el usuario sí escribió fecha)
+                    if low_txt not in skip_tokens:
                         ok_future, warn_msg = _validate_future_or_warn(txt_raw, state.get("lang"))
                         if not ok_future:
                             wa_send_text(user, warn_msg)
@@ -1221,7 +1217,7 @@ async def incoming(req: Request):
                             SESSIONS[user] = state
                             continue
 
-                    state["date"] = None if low in skip_tokens else (text or "").strip()
+                    state["date"] = None if low_txt in skip_tokens else (text or "").strip()
                     svc = state.get("pending_service")
 
                     if svc == "villas":
@@ -1298,7 +1294,7 @@ async def incoming(req: Request):
                         desc  = f"City: {pretty_city}\nService: {state.get('service_type') or 'N/A'}\nPax: {state.get('pax') or 'TBD'}\nDate: {state.get('date') or 'TBD'}\nEmail: {state.get('email') or '—'}\nLang: {state.get('lang')}\nSource: WhatsApp Bot"
                         hist_block = build_history_lines(state)
                         if state.get("last_top"):
-                            tops = "; ".join([f"{r.get('name')}→{r.get('url_page')}" for r in state['last_top'][:TOP_K]])
+                            tops = "; ".join([f\"{r.get('name')}→{r.get('url_page')}\" for r in state['last_top'][:TOP_K]])
                             desc += f"\nTop shown: {tops}"
                         if hist_block:
                             desc += f"\nHistory:\n{hist_block}"
