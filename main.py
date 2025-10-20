@@ -820,7 +820,7 @@ async def incoming(req: Request):
                 # Texto / respuesta
                 text, reply_id = extract_text_or_reply(m)
                 txt_raw = (text or "").strip()
-                low_txt = txt_raw.lower()  # 👈 Fallback de texto libre
+                low_txt = txt_raw.lower()
 
                 # ===== /start global =====
                 if low_txt in ("hola","hello","/start","start","inicio","menu"):
@@ -875,10 +875,7 @@ async def incoming(req: Request):
                             state["contact_id"] = hubspot_find_or_create_contact(
                                 state.get("name"), state.get("email"), user, state.get("lang")
                             )
-                            if is_es(state["lang"]):
-                                wa_send_text(user, "¡Perfecto! Registré tu correo. Continuemos 👉")
-                            else:
-                                wa_send_text(user, "Saved your email. Let’s continue 👉")
+                            wa_send_text(user, "¡Perfecto! Registré tu correo. Continuemos 👉" if is_es(state["lang"]) else "Saved your email. Let’s continue 👉")
                             state["step"] = "city"
                             h,b,btn,rows = city_list(state["lang"])
                             wa_send_list(user, h, b, btn, rows)
@@ -887,11 +884,7 @@ async def incoming(req: Request):
 
                     if rid == "EMAIL_ENTER":
                         state["step"] = "contact_email_enter"
-                        wa_send_text(
-                            user,
-                            ("Escribe tu correo (ej. nombre@dominio.com)." if is_es(state["lang"])
-                             else "Type your email (e.g., name@domain.com).")
-                        )
+                        wa_send_text(user, "Escribe tu correo (ej. nombre@dominio.com)." if is_es(state["lang"]) else "Type your email (e.g., name@domain.com).")
                         SESSIONS[user] = state
                         continue
 
@@ -900,11 +893,7 @@ async def incoming(req: Request):
                         state["contact_id"] = hubspot_find_or_create_contact(
                             state.get("name"), state.get("email"), user, state.get("lang")
                         )
-                        wa_send_text(
-                            user,
-                            "Anoté que prefieres continuar por WhatsApp. ¡Gracias! 🙌" if is_es(state["lang"])
-                            else "Noted you prefer WhatsApp. Thanks! 🙌"
-                        )
+                        wa_send_text(user, "Anoté que prefieres continuar por WhatsApp. ¡Gracias! 🙌" if is_es(state["lang"]) else "Noted you prefer WhatsApp. Thanks! 🙌")
                         state["step"] = "city"
                         h,b,btn,rows = city_list(state["lang"])
                         wa_send_list(user, h, b, btn, rows)
@@ -939,11 +928,7 @@ async def incoming(req: Request):
                         state["contact_id"] = hubspot_find_or_create_contact(
                             state.get("name"), state.get("email"), user, state.get("lang")
                         )
-                        wa_send_text(
-                            user,
-                            "¡Perfecto! Registré tu correo. Continuemos 👉" if is_es(state["lang"])
-                            else "Saved your email. Let’s continue 👉"
-                        )
+                        wa_send_text(user, "¡Perfecto! Registré tu correo. Continuemos 👉" if is_es(state["lang"]) else "Saved your email. Let’s continue 👉")
                         state["step"] = "city"
                         h,b,btn,rows = city_list(state["lang"])
                         wa_send_list(user, h, b, btn, rows)
@@ -1057,7 +1042,7 @@ async def incoming(req: Request):
                             state["step"] = "post_results"
                             wa_send_buttons(
                                 user,
-                                ("¿Cómo podemos seguir ayudándote?" if is_es(state["lang"]) else "How can we keep helping?"),
+                                "¿Cómo podemos seguir ayudándote?" if is_es(state["lang"]) else "How can we keep helping?",
                                 after_results_buttons(state["lang"])
                             )
                             SESSIONS[user] = state
@@ -1092,13 +1077,12 @@ async def incoming(req: Request):
                             if contact_id:
                                 hubspot_create_deal(contact_id, owner_id, title, desc)
 
-                            notify_sales("Talk to Team / Concierge", state, user,
-                                         cal_url=cal_url, owner_name=owner_name, pretty_city=pretty_city)
+                            notify_sales("Talk to Team / Concierge", state, user, cal_url=cal_url, owner_name=owner_name, pretty_city=pretty_city)
 
                             state["step"] = "post_results"
                             wa_send_buttons(
                                 user,
-                                ("¿Qué más necesitas?" if is_es(state["lang"]) else "What else do you need?"),
+                                "¿Qué más necesitas?" if is_es(state["lang"]) else "What else do you need?",
                                 after_results_buttons(state["lang"])
                             )
                             SESSIONS[user] = state
@@ -1265,7 +1249,7 @@ async def incoming(req: Request):
                     state["step"] = "post_results"
                     wa_send_buttons(
                         user,
-                        ("¿Cómo podemos seguir ayudándote?" if is_es(state["lang"]) else "How can we keep helping?"),
+                        "¿Cómo podemos seguir ayudándote?" if is_es(state["lang"]) else "How can we keep helping?",
                         after_results_buttons(state["lang"])
                     )
                     SESSIONS[user] = state
@@ -1294,7 +1278,8 @@ async def incoming(req: Request):
                         desc  = f"City: {pretty_city}\nService: {state.get('service_type') or 'N/A'}\nPax: {state.get('pax') or 'TBD'}\nDate: {state.get('date') or 'TBD'}\nEmail: {state.get('email') or '—'}\nLang: {state.get('lang')}\nSource: WhatsApp Bot"
                         hist_block = build_history_lines(state)
                         if state.get("last_top"):
-                            tops = "; ".join([f\"{r.get('name')}→{r.get('url_page')}\" for r in state['last_top'][:TOP_K]])
+                            # ✅ Línea corregida (sin escapes innecesarios)
+                            tops = "; ".join([f"{r.get('name')}→{r.get('url_page')}" for r in state['last_top'][:TOP_K]])
                             desc += f"\nTop shown: {tops}"
                         if hist_block:
                             desc += f"\nHistory:\n{hist_block}"
@@ -1306,10 +1291,10 @@ async def incoming(req: Request):
                         state["step"] = "post_results"
                         wa_send_buttons(
                             user,
-                            ("¿Qué más necesitas?" if is_es(state["lang"]) else "What else do you need?"),
+                            "¿Qué más necesitas?" if is_es(state["lang"]) else "What else do you need?",
                             [
-                                {"id":"POST_ADD_SERVICE","title":("Añadir otro servicio" if is_es(state["lang"]) else "Add another service")},
-                                {"id":"POST_MENU","title":("Volver al menú" if is_es(state["lang"]) else "Back to menu")},
+                                {"id":"POST_ADD_SERVICE","title":"Añadir otro servicio" if is_es(state["lang"]) else "Add another service"},
+                                {"id":"POST_MENU","title":"Volver al menú" if is_es(state["lang"]) else "Back to menu"},
                             ]
                         )
                         SESSIONS[user] = state
@@ -1324,8 +1309,7 @@ async def incoming(req: Request):
 
                     wa_send_buttons(
                         user,
-                        ("¿Quieres añadir otro servicio o hablar con el equipo?" if is_es(state["lang"]) else
-                         "Would you like to add another service or talk to the team?"),
+                        "¿Quieres añadir otro servicio o hablar con el equipo?" if is_es(state["lang"]) else "Would you like to add another service or talk to the team?",
                         after_results_buttons(state["lang"])
                     )
                     SESSIONS[user] = state
