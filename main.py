@@ -1,11 +1,12 @@
 # ==================== IMPORTS ====================
-import os, re, csv, io, requests, datetime, smtplib
+import os, re, csv, io, requests, smtplib
 import urllib.parse
 import unicodedata
 from email.mime.text import MIMEText
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
-
+from datetime import datetime
+from zoneinfo import ZoneInfo
 # ==================== APP ====================
 app = FastAPI()
 
@@ -100,6 +101,21 @@ def normalize_name(fullname: str) -> str:
 # ==================== Preferencias / etiquetas legibles ====================
 def is_es(lang: str) -> bool:
     return (lang or "EN").upper().startswith("ES")
+
+# ======= DESCRIPCIÓN (ES/EN) =======
+def get_locale(user_lang: str) -> str:
+    return "es" if (user_lang or "").lower().startswith("es") else "en"
+
+def pick_description(row: dict, user_lang: str) -> str:
+    lang = get_locale(user_lang)
+    desc = (row.get(f"description_{lang}") or "").strip()
+    if not desc:
+        desc = (row.get("description_en") or row.get("description_es") or "").strip()
+    # WA: límite de líneas – recorta un poco si es muy largo
+    if len(desc) > 360:
+        desc = desc[:357].rstrip() + "…"
+    return desc
+
 
 def human_pref_label(service: str, lang: str, category_tag: str) -> str:
     es = is_es(lang)
@@ -569,6 +585,7 @@ def boat_categories(lang):
         {"id":"BOAT_SPEED","title":"Speedboat","description":""},
         {"id":"BOAT_YACHT","title":"Yacht","description":""},
         {"id":"BOAT_CAT","title":"Catamaran","description":""},
+        {"id":"BOAT_ALL","title":"🚤 No estoy segur@ / Interesad@ en todos","description":""},  # 👈 nuevo
     ]
     button = ("Elegir" if is_es(lang) else "Choose")
     return header, body, button, rows
@@ -609,6 +626,53 @@ def ask_date(lang):
             "Type it like: 2026-02-15, 15/02/2026 or “May 2026”.\n\n"
             "If you don’t know yet, type *Skip*.")
 
+
+MSG_PAST_ES = "Oye, veo que colocaste una fecha que ya pasó. ¿La revisas y me confirmas?"
+MSG_PAST_EN = "Hey, looks like you entered a date that already passed. Could you update it?"
+
+_MONTHS_ES = {
+    "enero":1,"febrero":2,"marzo":3,"abril":4,"mayo":5,"junio":6,
+    "julio":7,"agosto":8,"septiembre":9,"setiembre":9,"octubre":10,"noviembre":11,"diciembre":12
+}
+_MONTHS_EN = {
+    "january":1,"february":2,"march":3,"april":4,"may":5,"june":6,
+    "july":7,"august":8,"september":9,"october":10,"november":11,"december":12
+}
+
+def _parse_date_loose(s: str):
+    """Devuelve date o None. Soporta: YYYY-MM-DD, DD/MM/YYYY, 'May 2026'/'mayo 2026' (toma día 1)."""
+    if not s: return None
+    x = s.strip()
+    # ISO
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(x, fmt).date()
+        except: pass
+    # Latam
+    for fmt in ("%d/%m/%Y", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(x, fmt).date()
+        except: pass
+    # 'May 2026' / 'mayo 2026'
+    tokens = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+|\d{4}", x)
+    if len(tokens) >= 2 and tokens[-1].isdigit() and len(tokens[-1]) == 4:
+        year = int(tokens[-1])
+        month_txt = strip_accents(" ".join(tokens[:-1]).lower()).strip()
+        m = _MONTHS_EN.get(month_txt) or _MONTHS_ES.get(month_txt)
+        if m:
+            return datetime(year, m, 1).date()
+    return None
+
+def _validate_future_or_warn(date_text: str, lang: str, tz_name="America/Bogota"):
+    """Si detecta fecha y es pasada -> (False, msg). Si no detecta fecha -> (True, None)."""
+    d = _parse_date_loose((date_text or "").strip())
+    if not d:
+        return True, None  # no hay fecha clara; continúa flujo normal
+    today_local = datetime.now(ZoneInfo(tz_name)).date()
+    if d < today_local:
+        return False, (MSG_PAST_ES if is_es(lang) else MSG_PAST_EN)
+    return True, None
+
 def after_results_buttons(lang):
     return [
         {"id":"POST_ADD_SERVICE","title":("Añadir otro servicio" if is_es(lang) else "Add another service")},
@@ -645,58 +709,69 @@ def format_results(lang, items, unit_label):
         if capacity:
             bits.append((f"cap. {capacity}" if es else f"cap. {capacity}"))
         sub = " • ".join([b for b in bits if b])
+
+        desc = pick_description(r, lang)  # 👈 NUEVO: descripción debajo
+
         if url:
             lines.append(f"• {name} — {sub}\n  {url}")
         else:
             lines.append(f"• {name} — {sub}")
+        if desc:
+            lines.append(f"  — {desc}")  # 👈 línea de descripción
     tail = ("\n¿Quieres que te conecte con nuestro equipo para reservar o ver más opciones?" if es
             else "\nWould you like me to connect you with our team to book or see more options?")
     lines.append(tail)
     return "\n".join(lines)
+    
+def wa_link_with_text(phone_e164: str, text: str) -> str:
+    # Convierte a dígitos (E.164 sin espacios) y arma wa.me con ?text=
+    return f"https://wa.me/{wa_click_number(phone_e164)}?text={urllib.parse.quote(text)}"
+
+def build_msg_to_ray(state: dict, owner_name="Ray", city_fallback="Cartagena"):
+    """
+    Texto prellenado para Ray. EN al inicio + explicación ES. Sin listas ni resumen.
+    """
+    name = state.get("name") or "Michel"
+    city = state.get("city") or city_fallback
+    svc  = (state.get("service_type") or "villas").lower()
+
+    # Preferencia legible (usa tus etiquetas ya mapeadas)
+    pref = human_pref_label(svc, state.get("lang") or "EN", state.get("category_tag"))
+    pref_txt = f" ({pref})" if pref else ""
+
+    # Fecha si el usuario la escribió (si no, no forzar)
+    d = state.get("date")
+    date_txt = f" for {d}" if d else ""
+
+    # Texto final tal cual solicitaste
+    text = (f"Hi Ray, I’m {name}. "
+            f"Como le comentaba a Luna, estoy interesad@ en {svc} en {city}{pref_txt}{date_txt}.")
+    return text
+
 
 # ==================== Handoff: mensaje combinado ====================
 def handoff_full_message(state, owner_name, wa_num, cal_url, pretty_city):
+    # Mensaje compacto con link directo y texto prellenado para Ray
+    prefilled = build_msg_to_ray(state, owner_name=owner_name.split()[0], city_fallback=pretty_city or "Cartagena")
+    link = wa_link_with_text(wa_num, prefilled)
     es = is_es(state.get("lang"))
-    pax = state.get("pax") or ("por definir" if es else "TBD")
-    date = state.get("date") or ("por definir" if es else "TBD")
-    email = state.get("email") or "—"
-    pref = human_pref_label(state.get("service_type"), state.get("lang"), state.get("category_tag"))
-    pref_txt = f" ({'preferencia' if es else 'preference'}: {pref})" if pref else ""
-    short_link = f"https://wa.me/{wa_click_number(wa_num)}"
 
     if es:
         lines = [
             f"Te conecto con *{owner_name}* (Two Travel).",
-            f"📲 Escríbele aquí: {short_link}",
+            f"📲 Escribe aquí: {link}",
         ]
+        # Si quieres mantener opción de agenda (opcional)
         if cal_url:
-            lines.append(f"📆 O agenda una llamada ahora mismo: {cal_url}")
-        lines += [
-            "",
-            "Resumen rápido:",
-            f"• Ciudad: {pretty_city}",
-            f"• Servicio: {state.get('service_type')}{pref_txt}",
-            f"• Pax: {pax}",
-            f"• Fecha/Mes: {date}",
-            f"• Email: {email}",
-        ]
+            lines.append(f"📆 O agenda una llamada: {cal_url}")
         return "\n".join(lines)
     else:
         lines = [
             f"I’m connecting you with *{owner_name}* (Two Travel).",
-            f"📲 Message here: {short_link}",
+            f"📲 Message here: {link}",
         ]
         if cal_url:
-            lines.append(f"📆 Or schedule a call now: {cal_url}")
-        lines += [
-            "",
-            "Quick summary:",
-            f"• City: {pretty_city}",
-            f"• Service: {state.get('service_type')}{pref_txt}",
-            f"• Guests: {pax}",
-            f"• Date/Month: {date}",
-            f"• Email: {email}",
-        ]
+            lines.append(f"📆 Or schedule a call: {cal_url}")
         return "\n".join(lines)
 
 # ==================== PAX HELPERS ====================
@@ -732,7 +807,6 @@ async def verify(req: Request):
         return PlainTextResponse(challenge, status_code=200)
     return PlainTextResponse("forbidden", status_code=403)
 
-# ==================== WEBHOOK INCOMING (POST) ====================
 @app.post("/wa-webhook")
 async def incoming(req: Request):
     data = await req.json()
@@ -808,7 +882,7 @@ async def incoming(req: Request):
                     rid = (reply_id or "").upper()
                     low = (txt_raw or "").lower()
 
-                    # 👇 Permitir que el usuario teclee su email aquí mismo
+                    # Permitir teclear email en este paso
                     typed_email = extract_first_email(txt_raw)
                     if typed_email:
                         clean = sanitize_email_input(typed_email)
@@ -869,10 +943,8 @@ async def incoming(req: Request):
 
                 # ===== 2b) Email (enter) =====
                 if state["step"] == "contact_email_enter":
-                    # Limpieza y tolerancia máxima
                     candidate = sanitize_email_input(txt_raw)
                     if not EMAIL_RE.match(candidate):
-                        # Busca primer email embebido si viene con texto alrededor
                         embedded = extract_first_email(txt_raw)
                         if embedded:
                             candidate = sanitize_email_input(embedded)
@@ -904,7 +976,7 @@ async def incoming(req: Request):
                         SESSIONS[user] = state
                         continue
 
-                    # Un solo intento fallido => no trabarse, avanzar
+                    # Un intento fallido -> avanzar
                     state["attempts_email"] = state.get("attempts_email", 0) + 1
                     if state["attempts_email"] >= 1:
                         state["email"] = ""
@@ -1081,17 +1153,22 @@ async def incoming(req: Request):
                 # ===== BOATS → categoría =====
                 if state["step"] == "boat_cat":
                     rid = (reply_id or "").upper()
-                    if rid not in ("BOAT_SPEED","BOAT_YACHT","BOAT_CAT"):
+                    # 🔧 Acepta también BOAT_ALL (para no filtrar por categoría)
+                    if rid not in ("BOAT_SPEED","BOAT_YACHT","BOAT_CAT","BOAT_ALL"):
                         h,b,btn,rows = boat_categories(state["lang"])
                         wa_send_list(user, h, b, btn, rows)
                         SESSIONS[user] = state
                         continue
-                    category_tag = {
-                        "BOAT_SPEED":"type_speedboat",
-                        "BOAT_YACHT":"type_yacht",
-                        "BOAT_CAT":"type_catamaran",
-                    }[rid]
-                    state["category_tag"] = category_tag
+
+                    if rid == "BOAT_ALL":
+                        state["category_tag"] = None  # mostrar todas las categorías
+                    else:
+                        state["category_tag"] = {
+                            "BOAT_SPEED":"type_speedboat",
+                            "BOAT_YACHT":"type_yacht",
+                            "BOAT_CAT":"type_catamaran",
+                        }[rid]
+
                     state["step"] = "boat_pax"
                     h,b,btn,rows = pax_list(state["lang"])
                     wa_send_list(user, h, b, btn, rows)
@@ -1130,10 +1207,20 @@ async def incoming(req: Request):
                     SESSIONS[user] = state
                     continue
 
-                # ===== FECHA (común) => resultados + handoff si vacío =====
+                # ===== FECHA (común) => validación + resultados / handoff =====
                 if state["step"] == "date":
                     low = (txt_raw or "").strip().lower()
                     skip_tokens = {"omitir","skip","no sé","nose","tbd","na","n/a","later","después","luego","aún no","no tengo","no se","todavia no","aun no"}
+
+                    # 🔧 Validación de fecha pasada (si el usuario sí escribió una fecha)
+                    if low not in skip_tokens:
+                        ok_future, warn_msg = _validate_future_or_warn(txt_raw, state.get("lang"))
+                        if not ok_future:
+                            wa_send_text(user, warn_msg)
+                            wa_send_text(user, ask_date(state["lang"]))
+                            SESSIONS[user] = state
+                            continue
+
                     state["date"] = None if low in skip_tokens else (text or "").strip()
                     svc = state.get("pending_service")
 
