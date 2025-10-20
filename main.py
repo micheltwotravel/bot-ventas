@@ -738,7 +738,7 @@ def _fmt_money_usd(amount):
     except:
         return f"USD {amount}"
 
-def format_results(lang, items, unit_label, service_type=None, city=None):
+def format_results(lang, items, unit_label, service_type=None, city=None, use_emojis=True):
     es = is_es(lang)
 
     if not items:
@@ -746,17 +746,16 @@ def format_results(lang, items, unit_label, service_type=None, city=None):
                 if es else
                 "I couldn’t find public options right now. I’ll connect you with our team for private & custom options. 🤝")
 
-    # Emojis por servicio
-    svc_emoji = {
-        "boats":"🚤", "villas":"🏠", "islands":"🏝️", "weddings":"💍"
-    }.get((service_type or "").lower(), "•")
+    # Emoji por servicio (o vacío si use_emojis=False)
+    svc_emoji_map = {"boats":"🚤","villas":"🏠","islands":"🏝️","weddings":"💍"}
+    svc_emoji = (svc_emoji_map.get((service_type or "").lower(), "•") if use_emojis else "")
 
-    # Encabezado más rico
-    if es:
-        head = f"{svc_emoji} Opciones encontradas" + (f" en {city}:" if city else ":")
-    else:
-        head = f"{svc_emoji} Options found" + (f" in {city}:" if city else ":")
-    lines = [head]
+    # Encabezado
+    head = (f"{svc_emoji + ' ' if svc_emoji else ''}" +
+            ("Opciones encontradas" if es else "Options found") +
+            (f" en {city}:" if city else ":"))
+
+    lines = [head, ""]  # línea en blanco
 
     for r in items[:TOP_K]:
         name = r.get("name") or r.get("title") or "—"
@@ -765,34 +764,70 @@ def format_results(lang, items, unit_label, service_type=None, city=None):
         price = _fmt_money_usd(r.get("price_from_usd"))
         capacity = r.get("capacity_max") or ""
 
-        bits = []
-        if loc: bits.append(loc)
-        if price: bits.append(price + (f"/{unit_label}" if unit_label else ""))
-        if capacity: bits.append(("cap. " if es else "cap. ") + str(capacity))
-        sub = " • ".join(bits)
+        meta_bits = []
+        if loc: meta_bits.append(loc)
+        if price: meta_bits.append(price + (f"/{unit_label}" if unit_label else ""))
+        if capacity: meta_bits.append(("cap. " if es else "cap. ") + str(capacity))
+        meta = " — ".join(meta_bits)
 
-        # Descripción recortada (por si viene muy larga)
         desc = pick_description(r, lang)
         if len(desc) > 260:
             desc = desc[:257].rstrip() + "…"
 
-        # Título principal (con emoji)
-        title_line = f"{svc_emoji} *{name}*" + (f" — {sub}" if sub else "")
-        if url:
-            lines.append(f"{title_line}\n  {url}")
-        else:
-            lines.append(title_line)
+        # Título sin emoji
+        title_line = f"*{name}*"
+        lines.append(title_line)
+        if meta: lines.append(meta)
+        if url:  lines.append(url)
+        if desc: lines.append(f"— {desc}")
+        lines.append("")  # línea en blanco entre tarjetas
 
-        if desc:
-            lines.append(f"  — {desc}")
-
-    tail = ("\n¿Quieres que te conecte con nuestro equipo para reservar o ver más opciones?"
+    tail = ("¿Quieres que te conecte con nuestro equipo para reservar o ver más opciones?"
             if es else
-            "\nWould you like me to connect you with our team to book or see more options?")
+            "Would you like me to connect you with our team to book or see more options?")
     lines.append(tail)
 
     return "\n".join(lines)
 
+def parse_boat_mix(text: str) -> dict:
+    """
+    Extrae cantidades por tipo de bote desde texto libre.
+    Soporta: lancha/speedboat, cat/catamaran, yacht.
+    Devuelve dict, ej: {"speedboat":1,"catamaran":1,"yacht":1}
+    """
+    if not text: return {}
+
+    t = norm(text)  # minúsculas, sin acentos
+    # equivalencias
+    aliases = {
+        "lancha": "speedboat",
+        "speedboat": "speedboat",
+        "speedboats": "speedboat",
+        "cat": "catamaran",
+        "catamaran": "catamaran",
+        "catamarans": "catamaran",
+        "yacht": "yacht",
+        "yachts": "yacht",
+    }
+
+    out = {"speedboat": 0, "catamaran": 0, "yacht": 0}
+
+    # casos “1 lancha”, “2 cat”, “3 yachts”
+    for num, word in re.findall(r"(\d+)\s*([a-záéíóúüñ]+)", t, re.IGNORECASE):
+        kind = aliases.get(word, "")
+        if kind:
+            out[kind] += int(num)
+
+    # si no pusieron número pero dijeron “cat, yacht” (asumir 1)
+    for kword, kind in [("lancha","speedboat"),("speedboat","speedboat"),
+                        ("cat","catamaran"),("catamaran","catamaran"),
+                        ("yacht","yacht")]:
+        if kind and out[kind] == 0 and re.search(rf"\b{kword}\b", t):
+            out[kind] = 1
+
+    # limpia ceros
+    return {k:v for k,v in out.items() if v>0}
+  
     
 def wa_link_with_text(phone_e164: str, text: str) -> str:
     # Convierte a dígitos (E.164 sin espacios) y arma wa.me con ?text=
@@ -851,6 +886,43 @@ def handoff_full_message(state, owner_name, wa_num, cal_url, pretty_city):
         if cal_url:
             lines.append(f"📆 Or schedule a call: {cal_url}")
         return "\n".join(lines)
+def parse_boat_mix(text: str) -> dict:
+    """
+    Extrae cantidades por tipo de bote desde texto libre.
+    Soporta: lancha/speedboat, cat/catamaran, yacht.
+    Devuelve dict, ej: {"speedboat":1,"catamaran":2,"yacht":1}
+    """
+    if not text:
+        return {}
+
+    t = norm(text)  # minúsculas, sin acentos
+    aliases = {
+        "lancha": "speedboat",
+        "speedboat": "speedboat",
+        "speedboats": "speedboat",
+        "cat": "catamaran",
+        "catamaran": "catamaran",
+        "catamarans": "catamaran",
+        "yacht": "yacht",
+        "yachts": "yacht",
+    }
+
+    out = {"speedboat": 0, "catamaran": 0, "yacht": 0}
+
+    # “1 lancha”, “2 cat”, “3 yachts”
+    for num, word in re.findall(r"(\d+)\s*([a-záéíóúüñ]+)", t, re.IGNORECASE):
+        kind = aliases.get(word, "")
+        if kind:
+            out[kind] += int(num)
+
+    # Si no pusieron número, asumir 1 si lo mencionan
+    for kword, kind in [("lancha","speedboat"),("speedboat","speedboat"),
+                        ("cat","catamaran"),("catamaran","catamaran"),
+                        ("yacht","yacht")]:
+        if out[kind] == 0 and re.search(rf"\b{kword}\b", t):
+            out[kind] = 1
+
+    return {k: v for k, v in out.items() if v > 0}
 
 # ==================== PAX HELPERS ====================
 def pax_from_reply(rid: str) -> int:
@@ -1265,6 +1337,45 @@ async def incoming(req: Request):
                 # ===== POST RESULTADOS =====
                 if state["step"] == "post_results":
                     rid = (reply_id or "").upper()
+
+                    if (state.get("service_type") == "boats") and txt_raw and not rid:
+                        mix = parse_boat_mix(txt_raw)
+                        if mix:
+                            state["boat_mix"] = mix
+                            set_session(user, state)
+                            es = is_es(state.get("lang"))
+                            parts_es, parts_en = [], []
+                            if mix.get("speedboat"):
+                                parts_es.append(f"{mix['speedboat']} lancha")
+                                parts_en.append(f"{mix['speedboat']} speedboat")
+                            if mix.get("catamaran"):
+                                parts_es.append(f"{mix['catamaran']} catamarán")
+                                parts_en.append(f"{mix['catamaran']} catamaran")
+                            if mix.get("yacht"):
+                                parts_es.append(f"{mix['yacht']} yate")
+                                parts_en.append(f"{mix['yacht']} yacht")
+                                
+                            ack = ("Perfecto — mix solicitado: " + ", ".join(parts_es)
+                                   if es else
+                                   "Got it — requested mix: " + ", ".join(parts_en))
+                            wa_send_text(user, ack)
+                            
+                            owner_name, owner_id, cal_url, pretty_city, wa_num = owner_for_city(state["city"])
+                            msg = handoff_full_message(state, owner_name, wa_num, cal_url, pretty_city)
+                            wa_send_text(user, msg)
+                            
+                            wa_send_buttons(
+                                user,
+                                "¿Qué más necesitas?" if es else "What else do you need?",
+                                [
+                                    {"id":"POST_ADD_SERVICE","title":"Añadir otro servicio" if es else "Add another service"},
+                                    {"id":"POST_MENU","title":"Volver al menú" if es else "Back to menu"},
+                                ]
+                            )
+                            continue
+                            
+
+                    
 
                     if rid == "POST_ADD_SERVICE":
                         state["step"] = "menu"
