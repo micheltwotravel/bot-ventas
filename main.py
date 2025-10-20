@@ -30,6 +30,21 @@ def _rkey(user: str) -> str:
     # Clave estable: sólo dígitos del número
     return f"two_travel:wa:s:{wa_click_number(user)}"
 
+def _boat_kind(row: dict) -> str:
+    """Devuelve 'speedboat' | 'catamaran' | 'yacht' | ''."""
+    tags = (row.get("preference_tags") or "").lower()
+    name = (row.get("name") or row.get("title") or "").lower()
+
+    def has(t): 
+        return t in tags or t in name
+
+    if has("type_speedboat") or "lancha" in name or "speedboat" in name:
+        return "speedboat"
+    if has("type_catamaran") or "catamaran" in name or "catamarán" in name or "cat" in name:
+        return "catamaran"
+    if has("type_yacht") or "yacht" in name or "yate" in name:
+        return "yacht"
+    return ""
 
 def get_session(user: str) -> dict | None:
     if _redis:
@@ -506,6 +521,7 @@ def filter_catalog(service, city, pax=0, category_tag=None, top_k=TOP_K):
     svc_norm = canonical_service(service)
     city_norm = canonical_city(city)
 
+    # Pool por servicio+ciudad
     pool = []
     for r in rows:
         r_svc = canonical_service(r.get("service_type",""))
@@ -516,6 +532,58 @@ def filter_catalog(service, city, pax=0, category_tag=None, top_k=TOP_K):
     if not pool:
         return []
 
+    # --- Diversificar BOATS cuando NO hay categoría (BOAT_ALL / BOAT_UNSURE) ---
+    #     Queremos 1 speedboat + 1 catamaran + 1 yacht (si existen), y rellenar faltantes.
+    if svc_norm == "boats" and not category_tag:
+        def safe_int(x, default=0):
+            try:
+                return int(float(x))
+            except:
+                return default
+
+        scored = []
+        for r in pool:
+            cap = safe_int(r.get("capacity_max"), 0)
+            price = _price_val(r)
+
+            if pax and cap:
+                gap = cap - pax
+                cap_penalty = 9999 if gap < 0 else gap
+            else:
+                cap_penalty = 0
+
+            kind = _boat_kind(r)  # speedboat/catamaran/yacht/''
+            scored.append((cap_penalty, price, kind, r))
+
+        # Ordenar por adecuación (capacidad) y precio
+        scored.sort(key=lambda t: (t[0], t[1]))
+
+        # 1) Mejor de cada tipo
+        best_by_kind = {}
+        for s in scored:
+            _, _, kind, r = s
+            if not kind:
+                continue
+            if kind not in best_by_kind:
+                best_by_kind[kind] = s
+
+        selected = [best_by_kind[k] for k in ("speedboat","catamaran","yacht") if k in best_by_kind]
+
+        # 2) Relleno si faltan slots (evitar duplicados exactos)
+        target = max(1, int(top_k or 1))
+        if len(selected) < target:
+            used_ids = {id(t[-1]) for t in selected}
+            for s in scored:
+                if id(s[-1]) in used_ids:
+                    continue
+                selected.append(s)
+                used_ids.add(id(s[-1]))
+                if len(selected) >= target:
+                    break
+
+        return [t[-1] for t in selected[:target]]
+
+    # --- Resto de servicios o cuando sí hay categoría ---
     def safe_int(x, default=0):
         try:
             return int(float(x))
@@ -542,6 +610,7 @@ def filter_catalog(service, city, pax=0, category_tag=None, top_k=TOP_K):
     scored.sort(key=lambda t: (t[0], t[1]))
     top_n = [r for _,__,r in scored[:max(1,int(top_k or 1))]]
     return top_n
+
 
 # ==================== TEXTOS / UI ====================
 def welcome_text():
