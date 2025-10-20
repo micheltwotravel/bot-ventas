@@ -9,6 +9,50 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 # ==================== APP ====================
 app = FastAPI()
+# ==== SESSIONS (persistente con Redis + fallback en memoria) ====
+import json, os
+REDIS_URL = os.getenv("REDIS_URL", "").strip()
+_redis = None
+if REDIS_URL:
+    try:
+        import redis
+        _redis = redis.from_url(REDIS_URL, decode_responses=True)
+        print("BOOT> Redis OK")
+    except Exception as e:
+        print("BOOT> Redis error:", e)
+        _redis = None
+
+SESSIONS = {}   # fallback en memoria (por si no hay Redis)
+SESSION_TTL_SECS = 60 * 60  # 1 hora
+
+def _rkey(user: str) -> str:
+    return f"two_travel:wa:s:{user}"
+
+def get_session(user: str) -> dict | None:
+    if _redis:
+        try:
+            raw = _redis.get(_rkey(user))
+            return json.loads(raw) if raw else None
+        except Exception as e:
+            print("Redis get error:", e)
+    return SESSIONS.get(user)
+
+def set_session(user: str, state: dict):
+    if _redis:
+        try:
+            _redis.setex(_rkey(user), SESSION_TTL_SECS, json.dumps(state))
+            return
+        except Exception as e:
+            print("Redis set error:", e)
+    SESSIONS[user] = state
+
+def del_session(user: str):
+    if _redis:
+        try:
+            _redis.delete(_rkey(user))
+        except Exception as e:
+            print("Redis del error:", e)
+    SESSIONS.pop(user, None)
 
 # ==================== CONFIG (ENV) ====================
 VERIFY_TOKEN = (os.getenv("WA_VERIFY_TOKEN") or "").strip()
@@ -791,7 +835,6 @@ async def show_routes():
 def root():
     return {"ok": True, "routes": [r.path for r in app.router.routes]}
 
-# ==================== WEBHOOK VERIFY (GET) ====================
 @app.post("/wa-webhook")
 async def incoming(req: Request):
     data = await req.json()
@@ -824,17 +867,18 @@ async def incoming(req: Request):
 
                 # ===== /start global =====
                 if low_txt in ("hola","hello","/start","start","inicio","menu"):
-                    SESSIONS[user] = {"step":"lang","lang":"EN","attempts_email":0}
+                    state = {"step":"lang","lang":"EN","attempts_email":0}
+                    set_session(user, state)
                     wa_send_buttons(user, welcome_text(), opener_buttons())
                     continue
 
-                # Si no hay sesión, forzar idioma
-                if user not in SESSIONS:
-                    SESSIONS[user] = {"step":"lang","lang":"EN","attempts_email":0}
+                # ===== Cargar sesión (si no hay, iniciar) =====
+                state = get_session(user)
+                if not state:
+                    state = {"step":"lang","lang":"EN","attempts_email":0}
+                    set_session(user, state)
                     wa_send_buttons(user, welcome_text(), opener_buttons())
                     continue
-
-                state = SESSIONS[user]
 
                 # ===== 0) Idioma =====
                 if state["step"] == "lang":
@@ -844,22 +888,21 @@ async def incoming(req: Request):
                     else:
                         state["lang"] = "EN"
                     state["step"] = "contact_name"
+                    set_session(user, state)
                     wa_send_text(user, human_intro(state["lang"]))
-                    SESSIONS[user] = state
                     continue
 
                 # ===== 1) Nombre =====
                 if state["step"] == "contact_name":
                     if not valid_name(txt_raw):
                         wa_send_text(user, ask_fullname(state["lang"]))
-                        SESSIONS[user] = state
                         continue
                     state["name"] = normalize_name(txt_raw)
                     state["step"] = "contact_email_choice"
                     state["attempts_email"] = 0
+                    set_session(user, state)
                     wa_send_text(user, ask_email(state["lang"]))
                     wa_send_buttons(user, " ", email_buttons(state["lang"]))
-                    SESSIONS[user] = state
                     continue
 
                 # ===== 2) Email (choice) =====
@@ -875,17 +918,17 @@ async def incoming(req: Request):
                             state["contact_id"] = hubspot_find_or_create_contact(
                                 state.get("name"), state.get("email"), user, state.get("lang")
                             )
-                            wa_send_text(user, "¡Perfecto! Registré tu correo. Continuemos 👉" if is_es(state["lang"]) else "Saved your email. Let’s continue 👉")
                             state["step"] = "city"
+                            set_session(user, state)
+                            wa_send_text(user, "¡Perfecto! Registré tu correo. Continuemos 👉" if is_es(state["lang"]) else "Saved your email. Let’s continue 👉")
                             h,b,btn,rows = city_list(state["lang"])
                             wa_send_list(user, h, b, btn, rows)
-                            SESSIONS[user] = state
                             continue
 
                     if rid == "EMAIL_ENTER":
                         state["step"] = "contact_email_enter"
+                        set_session(user, state)
                         wa_send_text(user, "Escribe tu correo (ej. nombre@dominio.com)." if is_es(state["lang"]) else "Type your email (e.g., name@domain.com).")
-                        SESSIONS[user] = state
                         continue
 
                     if rid == "EMAIL_USE_WA" or low_txt in ("usar whatsapp","use whatsapp"):
@@ -893,11 +936,11 @@ async def incoming(req: Request):
                         state["contact_id"] = hubspot_find_or_create_contact(
                             state.get("name"), state.get("email"), user, state.get("lang")
                         )
-                        wa_send_text(user, "Anoté que prefieres continuar por WhatsApp. ¡Gracias! 🙌" if is_es(state["lang"]) else "Noted you prefer WhatsApp. Thanks! 🙌")
                         state["step"] = "city"
+                        set_session(user, state)
+                        wa_send_text(user, "Anoté que prefieres continuar por WhatsApp. ¡Gracias! 🙌" if is_es(state["lang"]) else "Noted you prefer WhatsApp. Thanks! 🙌")
                         h,b,btn,rows = city_list(state["lang"])
                         wa_send_list(user, h, b, btn, rows)
-                        SESSIONS[user] = state
                         continue
 
                     if rid == "EMAIL_SKIP" or low_txt in ("skip","saltar","omitir"):
@@ -906,13 +949,12 @@ async def incoming(req: Request):
                             state.get("name"), state.get("email"), user, state.get("lang")
                         )
                         state["step"] = "city"
+                        set_session(user, state)
                         h,b,btn,rows = city_list(state["lang"])
                         wa_send_list(user, h, b, btn, rows)
-                        SESSIONS[user] = state
                         continue
 
                     wa_send_buttons(user, " ", email_buttons(state["lang"]))
-                    SESSIONS[user] = state
                     continue
 
                 # ===== 2b) Email (enter) =====
@@ -928,11 +970,11 @@ async def incoming(req: Request):
                         state["contact_id"] = hubspot_find_or_create_contact(
                             state.get("name"), state.get("email"), user, state.get("lang")
                         )
-                        wa_send_text(user, "¡Perfecto! Registré tu correo. Continuemos 👉" if is_es(state["lang"]) else "Saved your email. Let’s continue 👉")
                         state["step"] = "city"
+                        set_session(user, state)
+                        wa_send_text(user, "¡Perfecto! Registré tu correo. Continuemos 👉" if is_es(state["lang"]) else "Saved your email. Let’s continue 👉")
                         h,b,btn,rows = city_list(state["lang"])
                         wa_send_list(user, h, b, btn, rows)
-                        SESSIONS[user] = state
                         continue
 
                     if low_txt in ("", "skip","saltar","omitir","si","sí","yes","ok","dale","listo"):
@@ -941,12 +983,12 @@ async def incoming(req: Request):
                             state.get("name"), state.get("email"), user, state.get("lang")
                         )
                         state["step"] = "city"
+                        set_session(user, state)
                         h,b,btn,rows = city_list(state["lang"])
                         wa_send_list(user, h, b, btn, rows)
-                        SESSIONS[user] = state
                         continue
 
-                    # Un intento fallido -> avanzar
+                    # Un intento fallido -> avanzar igual
                     state["attempts_email"] = state.get("attempts_email", 0) + 1
                     if state["attempts_email"] >= 1:
                         state["email"] = ""
@@ -954,14 +996,14 @@ async def incoming(req: Request):
                             state.get("name"), state.get("email"), user, state.get("lang")
                         )
                         state["step"] = "city"
+                        set_session(user, state)
                         h,b,btn,rows = city_list(state["lang"])
                         wa_send_list(user, h, b, btn, rows)
-                        SESSIONS[user] = state
                         continue
 
                     wa_send_buttons(user, " ", email_buttons(state["lang"]))
                     state["step"] = "contact_email_choice"
-                    SESSIONS[user] = state
+                    set_session(user, state)
                     continue
 
                 # ===== 3) Ciudad =====
@@ -977,27 +1019,25 @@ async def incoming(req: Request):
                     if not city:
                         h,b,btn,rows = city_list(state["lang"])
                         wa_send_list(user, h, b, btn, rows)
-                        SESSIONS[user] = state
                         continue
                     state["city"] = city
                     state["step"] = "menu"
+                    set_session(user, state)
                     h,b,btn,rows = main_menu_list(state["lang"], state["city"])
                     wa_send_list(user, h, b, btn, rows)
-                    SESSIONS[user] = state
                     continue
 
                 # ===== 4) Menú (servicio) =====
                 if state["step"] == "menu":
                     rid = (reply_id or "").upper()
 
-                    # Fallback texto para Boats/Yachts
+                    # Fallback por texto para Boats/Yachts
                     is_boats_text = any(k in low_txt for k in [
                         "boat","boats","yacht","yachts",
                         "bote","botes","yate","yates",
                         "barco","barcos","lancha","lancha rapida","lancha rápida",
                         "catamaran","catamarán","mar","día en el mar","dia en el mar"
                     ])
-
                     valid_rid = rid in ("SVC_VILLAS","SVC_BOATS","SVC_ISLANDS","SVC_WEDDINGS","SVC_CONCIERGE","SVC_TEAM")
 
                     if valid_rid or is_boats_text:
@@ -1013,16 +1053,16 @@ async def incoming(req: Request):
 
                         if state["service_type"] == "villas":
                             state["step"] = "villa_pax"
+                            set_session(user, state)
                             h,b,btn,rows = pax_list(state["lang"])
                             wa_send_list(user, h, b, btn, rows)
-                            SESSIONS[user] = state
                             continue
 
                         if state["service_type"] == "boats":
                             state["step"] = "boat_cat"
+                            set_session(user, state)
                             h,b,btn,rows = boat_categories(state["lang"])
                             wa_send_list(user, h, b, btn, rows)
-                            SESSIONS[user] = state
                             continue
 
                         if state["service_type"] == "islands":
@@ -1030,6 +1070,8 @@ async def incoming(req: Request):
                             unit = "noche" if is_es(state["lang"]) else "night"
                             state["last_top"] = top
                             append_history(state, "islands")
+                            state["step"] = "post_results"
+                            set_session(user, state)
                             wa_send_text(user, format_results(state["lang"], top, unit))
 
                             owner_name, owner_id, cal_url, pretty_city, wa_num = owner_for_city(state.get("city"))
@@ -1039,20 +1081,18 @@ async def incoming(req: Request):
                                 msg = handoff_full_message(state, owner_name, wa_num, cal_url, pretty_city)
                                 wa_send_text(user, msg)
 
-                            state["step"] = "post_results"
                             wa_send_buttons(
                                 user,
                                 "¿Cómo podemos seguir ayudándote?" if is_es(state["lang"]) else "How can we keep helping?",
                                 after_results_buttons(state["lang"])
                             )
-                            SESSIONS[user] = state
                             continue
 
                         if state["service_type"] == "weddings":
                             state["step"] = "wed_guests"
+                            set_session(user, state)
                             h,b,btn,rows = weddings_guests_list(state["lang"])
                             wa_send_list(user, h, b, btn, rows)
-                            SESSIONS[user] = state
                             continue
 
                         if state["service_type"] in ("concierge","team"):
@@ -1080,18 +1120,17 @@ async def incoming(req: Request):
                             notify_sales("Talk to Team / Concierge", state, user, cal_url=cal_url, owner_name=owner_name, pretty_city=pretty_city)
 
                             state["step"] = "post_results"
+                            set_session(user, state)
                             wa_send_buttons(
                                 user,
                                 "¿Qué más necesitas?" if is_es(state["lang"]) else "What else do you need?",
                                 after_results_buttons(state["lang"])
                             )
-                            SESSIONS[user] = state
                             continue
 
                     # Si no hubo selección válida, re-mostramos menú
                     h,b,btn,rows = main_menu_list(state["lang"], state.get("city"))
                     wa_send_list(user, h, b, btn, rows)
-                    SESSIONS[user] = state
                     continue
 
                 # ===== VILLAS → PAX =====
@@ -1100,14 +1139,13 @@ async def incoming(req: Request):
                     if not rid or not rid.startswith("PAX_"):
                         h,b,btn,rows = pax_list(state["lang"])
                         wa_send_list(user, h, b, btn, rows)
-                        SESSIONS[user] = state
                         continue
                     pax = pax_from_reply(rid)
                     state["pax"] = pax
                     state["step"] = "villa_cat"
+                    set_session(user, state)
                     h,b,btn,rows = villa_categories(state["lang"])
-                    wa_send_list(user, h, ("Elige rango de *habitaciones*:" if is_es(state["lang"]) else "Choose *bedrooms* range:"), btn, rows)
-                    SESSIONS[user] = state
+                    wa_send_list(user, h, "Elige rango de *habitaciones*:" if is_es(state["lang"]) else "Choose *bedrooms* range:", btn, rows)
                     continue
 
                 # ===== VILLAS → CATEGORÍA =====
@@ -1115,20 +1153,18 @@ async def incoming(req: Request):
                     rid = (reply_id or "").upper()
                     if rid not in ("VILLA_3_6","VILLA_7_10","VILLA_11_14","VILLA_15P"):
                         h,b,btn,rows = villa_categories(state["lang"])
-                        wa_send_list(user, h, ("Elige rango de *habitaciones*:" if is_es(state["lang"]) else "Choose *bedrooms* range:"), btn, rows)
-                        SESSIONS[user] = state
+                        wa_send_list(user, h, "Elige rango de *habitaciones*:" if is_es(state["lang"]) else "Choose *bedrooms* range:", btn, rows)
                         continue
-                    category_tag = {
+                    state["category_tag"] = {
                         "VILLA_3_6":"bed_3_6",
                         "VILLA_7_10":"bed_7_10",
                         "VILLA_11_14":"bed_11_14",
                         "VILLA_15P":"bed_15_plus",
                     }[rid]
-                    state["category_tag"] = category_tag
                     state["step"] = "date"
                     state["pending_service"] = "villas"
+                    set_session(user, state)
                     wa_send_text(user, ask_date(state["lang"]))
-                    SESSIONS[user] = state
                     continue
 
                 # ===== BOATS → categoría =====
@@ -1138,7 +1174,6 @@ async def incoming(req: Request):
                     if rid not in ("BOAT_SPEED","BOAT_YACHT","BOAT_CAT","BOAT_ALL"):
                         h,b,btn,rows = boat_categories(state["lang"])
                         wa_send_list(user, h, b, btn, rows)
-                        SESSIONS[user] = state
                         continue
 
                     if rid == "BOAT_ALL":
@@ -1151,9 +1186,9 @@ async def incoming(req: Request):
                         }[rid]
 
                     state["step"] = "boat_pax"
+                    set_session(user, state)
                     h,b,btn,rows = pax_list(state["lang"])
                     wa_send_list(user, h, b, btn, rows)
-                    SESSIONS[user] = state
                     continue
 
                 # ===== BOATS → pax => FECHA =====
@@ -1162,14 +1197,13 @@ async def incoming(req: Request):
                     if not rid or not rid.startswith("PAX_"):
                         h,b,btn,rows = pax_list(state["lang"])
                         wa_send_list(user, h, b, btn, rows)
-                        SESSIONS[user] = state
                         continue
                     pax = pax_from_reply(rid)
                     state["pax"] = pax
                     state["step"] = "date"
                     state["pending_service"] = "boats"
+                    set_session(user, state)
                     wa_send_text(user, ask_date(state["lang"]))
-                    SESSIONS[user] = state
                     continue
 
                 # ===== WEDDINGS → invitados => FECHA =====
@@ -1178,14 +1212,13 @@ async def incoming(req: Request):
                     if rid not in ("WED_PAX_50","WED_PAX_100","WED_PAX_200","WED_PAX_201","WED_PAX_UNK"):
                         h,b,btn,rows = weddings_guests_list(state["lang"])
                         wa_send_list(user, h, b, btn, rows)
-                        SESSIONS[user] = state
                         continue
                     pax = pax_from_reply(rid)
                     state["pax"] = pax
                     state["step"] = "date"
                     state["pending_service"] = "weddings"
+                    set_session(user, state)
                     wa_send_text(user, ask_date(state["lang"]))
-                    SESSIONS[user] = state
                     continue
 
                 # ===== FECHA (común) => validación + resultados / handoff =====
@@ -1198,7 +1231,6 @@ async def incoming(req: Request):
                         if not ok_future:
                             wa_send_text(user, warn_msg)
                             wa_send_text(user, ask_date(state["lang"]))
-                            SESSIONS[user] = state
                             continue
 
                     state["date"] = None if low_txt in skip_tokens else (text or "").strip()
@@ -1209,6 +1241,8 @@ async def incoming(req: Request):
                         unit = "noche" if is_es(state["lang"]) else "night"
                         state["last_top"] = top
                         append_history(state, "villas")
+                        state["step"] = "post_results"
+                        set_session(user, state)
                         wa_send_text(user, format_results(state["lang"], top, unit))
 
                         owner_name, owner_id, cal_url, pretty_city, wa_num = owner_for_city(state.get("city"))
@@ -1223,6 +1257,8 @@ async def incoming(req: Request):
                         unit = "día" if is_es(state["lang"]) else "day"
                         state["last_top"] = top
                         append_history(state, "boats")
+                        state["step"] = "post_results"
+                        set_session(user, state)
                         wa_send_text(user, format_results(state["lang"], top, unit))
 
                         owner_name, owner_id, cal_url, pretty_city, wa_num = owner_for_city(state.get("city"))
@@ -1237,6 +1273,8 @@ async def incoming(req: Request):
                         unit = "evento" if is_es(state["lang"]) else "event"
                         state["last_top"] = top
                         append_history(state, "weddings")
+                        state["step"] = "post_results"
+                        set_session(user, state)
                         wa_send_text(user, format_results(state["lang"], top, unit))
 
                         owner_name, owner_id, cal_url, pretty_city, wa_num = owner_for_city(state.get("city"))
@@ -1246,13 +1284,11 @@ async def incoming(req: Request):
                             msg = handoff_full_message(state, owner_name, wa_num, cal_url, pretty_city)
                             wa_send_text(user, msg)
 
-                    state["step"] = "post_results"
                     wa_send_buttons(
                         user,
                         "¿Cómo podemos seguir ayudándote?" if is_es(state["lang"]) else "How can we keep helping?",
                         after_results_buttons(state["lang"])
                     )
-                    SESSIONS[user] = state
                     continue
 
                 # ===== Post resultados =====
@@ -1261,9 +1297,9 @@ async def incoming(req: Request):
 
                     if rid == "POST_ADD_SERVICE":
                         state["step"] = "menu"
+                        set_session(user, state)
                         h,b,btn,rows = main_menu_list(state["lang"], state.get("city"))
                         wa_send_list(user, h, b, btn, rows)
-                        SESSIONS[user] = state
                         continue
 
                     if rid == "POST_TALK_TEAM":
@@ -1278,7 +1314,6 @@ async def incoming(req: Request):
                         desc  = f"City: {pretty_city}\nService: {state.get('service_type') or 'N/A'}\nPax: {state.get('pax') or 'TBD'}\nDate: {state.get('date') or 'TBD'}\nEmail: {state.get('email') or '—'}\nLang: {state.get('lang')}\nSource: WhatsApp Bot"
                         hist_block = build_history_lines(state)
                         if state.get("last_top"):
-                            # ✅ Línea corregida (sin escapes innecesarios)
                             tops = "; ".join([f"{r.get('name')}→{r.get('url_page')}" for r in state['last_top'][:TOP_K]])
                             desc += f"\nTop shown: {tops}"
                         if hist_block:
@@ -1289,6 +1324,7 @@ async def incoming(req: Request):
                         notify_sales("Talk to Team", state, user, cal_url=cal_url, owner_name=owner_name, pretty_city=pretty_city)
 
                         state["step"] = "post_results"
+                        set_session(user, state)
                         wa_send_buttons(
                             user,
                             "¿Qué más necesitas?" if is_es(state["lang"]) else "What else do you need?",
@@ -1297,14 +1333,13 @@ async def incoming(req: Request):
                                 {"id":"POST_MENU","title":"Volver al menú" if is_es(state["lang"]) else "Back to menu"},
                             ]
                         )
-                        SESSIONS[user] = state
                         continue
 
                     if rid == "POST_MENU":
                         state["step"] = "menu"
+                        set_session(user, state)
                         h,b,btn,rows = main_menu_list(state["lang"], state.get("city"))
                         wa_send_list(user, h, b, btn, rows)
-                        SESSIONS[user] = state
                         continue
 
                     wa_send_buttons(
@@ -1312,7 +1347,7 @@ async def incoming(req: Request):
                         "¿Quieres añadir otro servicio o hablar con el equipo?" if is_es(state["lang"]) else "Would you like to add another service or talk to the team?",
                         after_results_buttons(state["lang"])
                     )
-                    SESSIONS[user] = state
                     continue
 
     return {"ok": True}
+
