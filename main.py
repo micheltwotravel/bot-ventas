@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 # ==================== APP ====================
 app = FastAPI()
 # ==== SESSIONS (persistente con Redis + fallback en memoria) ====
+# ==== SESSIONS (persistente con Redis + fallback en memoria) ====
 import json, os
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 _redis = None
@@ -54,6 +55,7 @@ def del_session(user: str):
             print("Redis del error:", e)
     SESSIONS.pop(user, None)
 
+
 # ==================== CONFIG (ENV) ====================
 VERIFY_TOKEN = (os.getenv("WA_VERIFY_TOKEN") or "").strip()
 WA_TOKEN     = (os.getenv("WA_ACCESS_TOKEN") or "").strip()
@@ -90,7 +92,7 @@ SMTP_PASS    = (os.getenv("SMTP_PASS") or "").strip()
 SALES_EMAILS = [e.strip() for e in (os.getenv("SALES_EMAILS") or "michel@two.travel").split(",") if e.strip()]
 
 # Estado en memoria
-SESSIONS   = {}    # { phone: {step, lang, city, service_type, ...}}
+
 LAST_MSGID = {}    # evitar reprocesar el mismo mensaje WA
 
 # ==================== Regex / Normalización robusta ====================
@@ -786,6 +788,14 @@ def build_msg_to_ray(state: dict, owner_name="Ray", city_fallback="Cartagena"):
     text = (f"Hi {owner_name}, I’m {name}. "
             f"Como le comentaba a Luna, estoy interesad@ en {svc} en {city}{pref_txt}{date_txt}.")
     return text
+def get_session(user: str) -> dict | None:
+    if _redis:
+        try:
+            raw = _redis.get(_rkey(user))
+            return json.loads(raw) if raw else None
+        except Exception as e:
+            print("Redis get error:", e)
+    return SESSIONS.get(user)
 
 # ==================== Handoff: mensaje combinado ====================
 def handoff_full_message(state, owner_name, wa_num, cal_url, pretty_city):
@@ -1061,6 +1071,7 @@ async def incoming(req: Request):
                         if state["service_type"] == "boats":
                             state["step"] = "boat_cat"
                             set_session(user, state)
+                            wa_send_text(user, "Perfecto, veamos tipos de bote…" if is_es(state["lang"]) else "Great—let’s pick a boat type…")
                             h,b,btn,rows = boat_categories(state["lang"])
                             wa_send_list(user, h, b, btn, rows)
                             continue
