@@ -27,7 +27,9 @@ SESSIONS = {}   # fallback en memoria (por si no hay Redis)
 SESSION_TTL_SECS = 60 * 60  # 1 hora
 
 def _rkey(user: str) -> str:
-    return f"two_travel:wa:s:{user}"
+    # Clave estable: sólo dígitos del número
+    return f"two_travel:wa:s:{wa_click_number(user)}"
+
 
 def get_session(user: str) -> dict | None:
     if _redis:
