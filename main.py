@@ -1294,12 +1294,27 @@ async def incoming(req: Request):
                         wa_send_list(user, h, b, btn, rows)
                         continue
 
+                    # ⛵️ Si NO SÉ → conectar directo con Ray (sin pedir pax/fecha)
+                    if rid == "BOAT_UNSURE":
+                        owner_name, owner_id, cal_url, pretty_city, wa_num = owner_for_city(state["city"])
+                        msg = handoff_full_message(state, owner_name, wa_num, cal_url, pretty_city)
+                        wa_send_text(user, msg)
+                        wa_send_buttons(
+                            user,
+                            "¿Qué más necesitas?" if is_es(state["lang"]) else "What else do you need?",
+                            [
+                                {"id":"POST_ADD_SERVICE","title":"Añadir otro servicio" if is_es(state["lang"]) else "Add another service"},
+                                {"id":"POST_MENU","title":"Volver al menú" if is_es(state["lang"]) else "Back to menu"},
+                            ]
+                        )
+                        continue
+
+                    # El resto sigue normal (ALL activa mezcla 1-1-1 en filter_catalog)
                     state["category_tag"] = {
                         "BOAT_SPEED":"type_speedboat",
                         "BOAT_YACHT":"type_yacht",
                         "BOAT_CAT":"type_catamaran",
                         "BOAT_ALL":None,
-                        "BOAT_UNSURE":None,
                     }[rid]
 
                     state["step"] = "boat_pax"
@@ -1434,16 +1449,15 @@ async def incoming(req: Request):
                             if mix.get("yacht"):
                                 parts_es.append(f"{mix['yacht']} yate")
                                 parts_en.append(f"{mix['yacht']} yacht")
-                                
                             ack = ("Perfecto — mix solicitado: " + ", ".join(parts_es)
                                    if es else
                                    "Got it — requested mix: " + ", ".join(parts_en))
                             wa_send_text(user, ack)
-                            
+
                             owner_name, owner_id, cal_url, pretty_city, wa_num = owner_for_city(state["city"])
                             msg = handoff_full_message(state, owner_name, wa_num, cal_url, pretty_city)
                             wa_send_text(user, msg)
-                            
+
                             wa_send_buttons(
                                 user,
                                 "¿Qué más necesitas?" if es else "What else do you need?",
@@ -1453,9 +1467,6 @@ async def incoming(req: Request):
                                 ]
                             )
                             continue
-                            
-
-                    
 
                     if rid == "POST_ADD_SERVICE":
                         state["step"] = "menu"
