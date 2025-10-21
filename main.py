@@ -31,27 +31,43 @@ def _rkey(user: str) -> str:
     return f"two_travel:wa:s:{wa_click_number(user)}"
 
 def _boat_kind(row: dict) -> str:
-    """Devuelve 'speedboat' | 'catamaran' | 'yacht' | '' con detección robusta."""
+    """
+    Devuelve 'speedboat' | 'catamaran' | 'yacht' | ''.
+    PRIORIDAD: category_tags  > preference_tags  > nombre/desc/url.
+    """
+    cats = (row.get("category_tags") or "").lower()
     tags = (row.get("preference_tags") or "").lower()
     name = (row.get("name") or row.get("title") or "").lower()
+    d_es = (row.get("description_es") or "").lower()
+    d_en = (row.get("description_en") or "").lower()
+    url  = (row.get("url_page") or row.get("url") or "").lower()
 
-    # normalizamos a tokens para evitar falsos positivos (p.ej. 'captain')
-    tokens = re.findall(r"[a-záéíóúüñ]+", name)
+    def has_tag(csv_like: str, key: str) -> bool:
+        padded = f",{csv_like},"
+        return f",{key}," in padded
 
-    def has_tag(t: str) -> bool:
-        # busca tags exactos separados por comas
-        padded = f",{tags},"
-        return f",{t}," in padded
+    # 1) Señal fuerte: CATEGORY_TAGS
+    if has_tag(cats, "type_speedboat"):  return "speedboat"
+    if has_tag(cats, "type_catamaran"):  return "catamaran"
+    if has_tag(cats, "type_yacht"):      return "yacht"
 
-    def has_token(*words) -> bool:
-        return any(w in tokens for w in words)
+    # 2) Respaldo: PREFERENCE_TAGS (por si acaso)
+    if has_tag(tags, "type_speedboat"):  return "speedboat"
+    if has_tag(tags, "type_catamaran"):  return "catamaran"
+    if has_tag(tags, "type_yacht"):      return "yacht"
 
-    if has_tag("type_speedboat") or has_token("lancha", "speedboat", "speedboats"):
-        return "speedboat"
-    if has_tag("type_catamaran") or has_token("catamaran", "catamarán", "catamarans"):
-        return "catamaran"
-    if has_tag("type_yacht") or has_token("yacht", "yachts", "yate", "yates"):
-        return "yacht"
+    # 3) Respaldo por texto (nombre/desc/url)
+    blob = " ".join([name, d_es, d_en])
+    tokens = re.findall(r"[a-záéíóúüñ]+", blob)  # evita falsos positivos como 'captain'
+
+    if any(w in tokens for w in ("lancha","speedboat","speedboats")):      return "speedboat"
+    if any(w in tokens for w in ("catamaran","catamarán","catamarans")):   return "catamaran"
+    if any(w in tokens for w in ("yacht","yachts","yate","yates")):        return "yacht"
+
+    if any(s in url for s in ("speed","lancha")):      return "speedboat"
+    if any(s in url for s in ("catamaran","/cat/")):   return "catamaran"
+    if any(s in url for s in ("yacht","yate")):        return "yacht"
+
     return ""
 
 
