@@ -31,19 +31,39 @@ def _rkey(user: str) -> str:
     return f"two_travel:wa:s:{wa_click_number(user)}"
 
 def _boat_kind(row: dict) -> str:
-    """Devuelve 'speedboat' | 'catamaran' | 'yacht' | ''."""
-    tags = (row.get("preference_tags") or "").lower()
-    name = (row.get("name") or row.get("title") or "").lower()
+    """
+    Devuelve: 'speedboat' | 'catamaran' | 'yacht' | ''.
+    Usa tags, tipo explícito y nombre, con regex seguras.
+    """
+    import re
 
-    def has(t): 
-        return t in tags or t in name
+    def lower_strip(x): 
+        return (x or "").strip().lower()
 
-    if has("type_speedboat") or "lancha" in name or "speedboat" in name:
+    tags = lower_strip(row.get("preference_tags"))
+    btype = lower_strip(row.get("boat_type") or row.get("type"))
+    name  = lower_strip(row.get("name") or row.get("title"))
+
+    def has_tag(t): 
+        return t in tags
+
+    # 1) Señales fuertes por tag/atributo
+    if has_tag("type_speedboat") or btype == "speedboat":
         return "speedboat"
-    if has("type_catamaran") or "catamaran" in name or "catamarán" in name or "cat" in name:
+    if has_tag("type_catamaran") or btype == "catamaran":
         return "catamaran"
-    if has("type_yacht") or "yacht" in name or "yate" in name:
+    if has_tag("type_yacht") or btype == "yacht":
         return "yacht"
+
+    # 2) Señales por nombre con límites de palabra
+    if re.search(r"\bspeedboat\b|\blancha\b", name):
+        return "speedboat"
+    if re.search(r"\bcatamar[aá]n\b|\bcatamaran\b|\bcat\b", name):
+        # '\bcat\b' sólo como palabra completa
+        return "catamaran"
+    if re.search(r"\byacht\b|\byate\b", name):
+        return "yacht"
+
     return ""
 
 def get_session(user: str) -> dict | None:
@@ -521,6 +541,11 @@ def filter_catalog(service, city, pax=0, category_tag=None, top_k=TOP_K):
     svc_norm = canonical_service(service)
     city_norm = canonical_city(city)
 
+    # Normaliza category_tag para activar diversificación en "ALL/UNSURE"
+    cat_norm = (str(category_tag).strip().lower() if category_tag is not None else None)
+    if cat_norm in ("", "all", "unsure", "none", "null"):
+        cat_norm = None
+
     # Pool por servicio+ciudad
     pool = []
     for r in rows:
@@ -534,7 +559,7 @@ def filter_catalog(service, city, pax=0, category_tag=None, top_k=TOP_K):
 
     # --- Diversificar BOATS cuando NO hay categoría (BOAT_ALL / BOAT_UNSURE) ---
     #     Queremos 1 speedboat + 1 catamaran + 1 yacht (si existen), y rellenar faltantes.
-    if svc_norm == "boats" and not category_tag:
+    if svc_norm == "boats" and cat_norm is None:
         def safe_int(x, default=0):
             try:
                 return int(float(x))
@@ -552,7 +577,7 @@ def filter_catalog(service, city, pax=0, category_tag=None, top_k=TOP_K):
             else:
                 cap_penalty = 0
 
-            kind = _boat_kind(r)  # speedboat/catamaran/yacht/''
+            kind = _boat_kind(r)  # speedboat/catamaran/yacht/'' mejorado
             scored.append((cap_penalty, price, kind, r))
 
         # Ordenar por adecuación (capacidad) y precio
@@ -561,7 +586,7 @@ def filter_catalog(service, city, pax=0, category_tag=None, top_k=TOP_K):
         # 1) Mejor de cada tipo
         best_by_kind = {}
         for s in scored:
-            _, _, kind, r = s
+            _, _, kind, _r = s
             if not kind:
                 continue
             if kind not in best_by_kind:
@@ -602,7 +627,7 @@ def filter_catalog(service, city, pax=0, category_tag=None, top_k=TOP_K):
             cap_penalty = 0
 
         bonus = 0
-        if category_tag and _tag_hit(r.get("preference_tags",""), category_tag):
+        if cat_norm and _tag_hit(r.get("preference_tags",""), cat_norm):
             bonus = -10
 
         scored.append((cap_penalty + bonus, price, r))
@@ -610,7 +635,6 @@ def filter_catalog(service, city, pax=0, category_tag=None, top_k=TOP_K):
     scored.sort(key=lambda t: (t[0], t[1]))
     top_n = [r for _,__,r in scored[:max(1,int(top_k or 1))]]
     return top_n
-
 
 # ==================== TEXTOS / UI ====================
 def welcome_text():
