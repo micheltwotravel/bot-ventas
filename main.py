@@ -31,40 +31,29 @@ def _rkey(user: str) -> str:
     return f"two_travel:wa:s:{wa_click_number(user)}"
 
 def _boat_kind(row: dict) -> str:
-    """
-    Devuelve: 'speedboat' | 'catamaran' | 'yacht' | ''.
-    Usa tags, tipo explícito y nombre, con regex seguras.
-    """
-    import re
+    """Devuelve 'speedboat' | 'catamaran' | 'yacht' | '' con detección robusta."""
+    tags = (row.get("preference_tags") or "").lower()
+    name = (row.get("name") or row.get("title") or "").lower()
 
-    def lower_strip(x): 
-        return (x or "").strip().lower()
+    # normalizamos a tokens para evitar falsos positivos (p.ej. 'captain')
+    tokens = re.findall(r"[a-záéíóúüñ]+", name)
 
-    tags = lower_strip(row.get("preference_tags"))
-    btype = lower_strip(row.get("boat_type") or row.get("type"))
-    name  = lower_strip(row.get("name") or row.get("title"))
+    def has_tag(t: str) -> bool:
+        # busca tags exactos separados por comas
+        padded = f",{tags},"
+        return f",{t}," in padded
 
-    def has_tag(t): 
-        return t in tags
+    def has_token(*words) -> bool:
+        return any(w in tokens for w in words)
 
-    # 1) Señales fuertes por tag/atributo
-    if has_tag("type_speedboat") or btype == "speedboat":
+    if has_tag("type_speedboat") or has_token("lancha", "speedboat", "speedboats"):
         return "speedboat"
-    if has_tag("type_catamaran") or btype == "catamaran":
+    if has_tag("type_catamaran") or has_token("catamaran", "catamarán", "catamarans"):
         return "catamaran"
-    if has_tag("type_yacht") or btype == "yacht":
+    if has_tag("type_yacht") or has_token("yacht", "yachts", "yate", "yates"):
         return "yacht"
-
-    # 2) Señales por nombre con límites de palabra
-    if re.search(r"\bspeedboat\b|\blancha\b", name):
-        return "speedboat"
-    if re.search(r"\bcatamar[aá]n\b|\bcatamaran\b|\bcat\b", name):
-        # '\bcat\b' sólo como palabra completa
-        return "catamaran"
-    if re.search(r"\byacht\b|\byate\b", name):
-        return "yacht"
-
     return ""
+
 
 def get_session(user: str) -> dict | None:
     if _redis:
@@ -541,7 +530,7 @@ def filter_catalog(service, city, pax=0, category_tag=None, top_k=TOP_K):
     svc_norm = canonical_service(service)
     city_norm = canonical_city(city)
 
-    # Normaliza category_tag para activar diversificación en "ALL/UNSURE"
+    # --- Normaliza category_tag para activar diversificación en "ALL/UNSURE" ---
     cat_norm = (str(category_tag).strip().lower() if category_tag is not None else None)
     if cat_norm in ("", "all", "unsure", "none", "null"):
         cat_norm = None
@@ -557,8 +546,8 @@ def filter_catalog(service, city, pax=0, category_tag=None, top_k=TOP_K):
     if not pool:
         return []
 
-    # --- Diversificar BOATS cuando NO hay categoría (BOAT_ALL / BOAT_UNSURE) ---
-    #     Queremos 1 speedboat + 1 catamaran + 1 yacht (si existen), y rellenar faltantes.
+    # --- Diversificar BOATS cuando NO hay categoría (ALL/UNSURE) ---
+    # 1 speedboat + 1 catamaran + 1 yacht (si existen), y rellenar hasta top_k
     if svc_norm == "boats" and cat_norm is None:
         def safe_int(x, default=0):
             try:
@@ -577,13 +566,11 @@ def filter_catalog(service, city, pax=0, category_tag=None, top_k=TOP_K):
             else:
                 cap_penalty = 0
 
-            kind = _boat_kind(r)  # speedboat/catamaran/yacht/'' mejorado
+            kind = _boat_kind(r)  # speedboat/catamaran/yacht/'' (robusto)
             scored.append((cap_penalty, price, kind, r))
 
-        # Ordenar por adecuación (capacidad) y precio
         scored.sort(key=lambda t: (t[0], t[1]))
 
-        # 1) Mejor de cada tipo
         best_by_kind = {}
         for s in scored:
             _, _, kind, _r = s
@@ -594,7 +581,6 @@ def filter_catalog(service, city, pax=0, category_tag=None, top_k=TOP_K):
 
         selected = [best_by_kind[k] for k in ("speedboat","catamaran","yacht") if k in best_by_kind]
 
-        # 2) Relleno si faltan slots (evitar duplicados exactos)
         target = max(1, int(top_k or 1))
         if len(selected) < target:
             used_ids = {id(t[-1]) for t in selected}
@@ -608,7 +594,7 @@ def filter_catalog(service, city, pax=0, category_tag=None, top_k=TOP_K):
 
         return [t[-1] for t in selected[:target]]
 
-    # --- Resto de servicios o cuando sí hay categoría ---
+    # --- Resto de servicios o cuando SÍ hay categoría ---
     def safe_int(x, default=0):
         try:
             return int(float(x))
@@ -635,6 +621,7 @@ def filter_catalog(service, city, pax=0, category_tag=None, top_k=TOP_K):
     scored.sort(key=lambda t: (t[0], t[1]))
     top_n = [r for _,__,r in scored[:max(1,int(top_k or 1))]]
     return top_n
+
 
 # ==================== TEXTOS / UI ====================
 def welcome_text():
