@@ -204,6 +204,15 @@ def pick_description(row: dict, user_lang: str) -> str:
         desc = desc[:357].rstrip() + "…"
     return desc
 
+def reset_to_menu(state, user):
+    # Limpiar cualquier rastro del flujo anterior
+    state["step"] = "menu"
+    state["service_type"] = None
+    state["pending_service"] = None
+    state["category_tag"] = None
+    state["pax"] = None
+    state["date"] = None
+    set_session(user, state)
 
 def human_pref_label(service: str, lang: str, category_tag: str) -> str:
     es = is_es(lang)
@@ -1048,6 +1057,16 @@ async def incoming(req: Request):
     data = await req.json()
     print("Incoming:", data)
 
+    # helper local para volver al menú limpio
+    def reset_to_menu(state, user):
+        state["step"] = "menu"
+        state["service_type"] = None
+        state["pending_service"] = None
+        state["category_tag"] = None
+        state["pax"] = None
+        state["date"] = None
+        set_session(user, state)
+
     for entry in data.get("entry", []):
         for change in entry.get("changes", []):
             value = change.get("value", {})
@@ -1075,6 +1094,7 @@ async def incoming(req: Request):
                 text, reply_id = extract_text_or_reply(m)
                 txt_raw = (text or "").strip()
                 low_txt = txt_raw.lower()
+                rid = (reply_id or "").upper()
 
                 # ===== INICIO / RESTART =====
                 if low_txt in ("hola","hello","/start","start","inicio","menu"):
@@ -1088,7 +1108,6 @@ async def incoming(req: Request):
                         })
                         set_session(user, state)
                         wa_send_buttons(user, welcome_text(), opener_buttons())
-                    # Si ya estaba welcomed, no repetimos opener
                     continue
 
                 # ===== CARGAR SESIÓN =====
@@ -1100,9 +1119,16 @@ async def incoming(req: Request):
                     wa_send_buttons(user, welcome_text(), opener_buttons())
                     continue
 
+                # ===== Blindaje contra clics viejos de BOATS fuera de su paso =====
+                if rid.startswith("BOAT_") and state.get("step") != "boat_cat":
+                    if state.get("step") != "menu":
+                        reset_to_menu(state, user)
+                    h,b,btn,rows = main_menu_list(state.get("lang","EN"), state.get("city"))
+                    wa_send_list(user, h, b, btn, rows)
+                    continue
+
                 # ===== 0) Idioma =====
                 if state["step"] == "lang":
-                    rid = (reply_id or "").upper().strip()
                     if rid == "LANG_ES" or "español" in low_txt or low_txt == "es":
                         state["lang"] = "ES"
                     else:
@@ -1126,8 +1152,6 @@ async def incoming(req: Request):
 
                 # ===== 2) Email (choice) =====
                 if state["step"] == "contact_email_choice":
-                    rid = (reply_id or "").upper()
-
                     # Permitir teclear email en este paso
                     typed_email = extract_first_email(txt_raw)
                     if typed_email:
@@ -1215,7 +1239,6 @@ async def incoming(req: Request):
 
                 # ===== 3) CIUDAD =====
                 if state["step"] == "city":
-                    rid = (reply_id or "").upper()
                     city_map = {
                         "CITY_CARTAGENA":"cartagena",
                         "CITY_MEDELLIN":"medellín",
@@ -1236,7 +1259,6 @@ async def incoming(req: Request):
 
                 # ===== 4) MENÚ DE SERVICIOS =====
                 if state["step"] == "menu":
-                    rid = (reply_id or "").upper()
                     svc_map = {
                         "SVC_VILLAS":"villas",
                         "SVC_BOATS":"boats",
@@ -1303,7 +1325,6 @@ async def incoming(req: Request):
 
                 # ===== BOATS → categoría =====
                 if state["step"] == "boat_cat":
-                    rid = (reply_id or "").upper()
                     valid = ("BOAT_SPEED","BOAT_YACHT","BOAT_CAT","BOAT_ALL","BOAT_UNSURE")
                     if rid not in valid:
                         h,b,btn,rows = boat_categories(state["lang"])
@@ -1341,7 +1362,6 @@ async def incoming(req: Request):
 
                 # ===== BOATS → PAX =====
                 if state["step"] == "boat_pax":
-                    rid = (reply_id or "").upper()
                     if not rid or not rid.startswith("PAX_"):
                         h,b,btn,rows = pax_list(state["lang"])
                         wa_send_list(user, h, b, btn, rows)
@@ -1355,7 +1375,6 @@ async def incoming(req: Request):
 
                 # ===== VILLAS → PAX =====
                 if state["step"] == "villa_pax":
-                    rid = (reply_id or "").upper()
                     if not rid or not rid.startswith("PAX_"):
                         h,b,btn,rows = pax_list(state["lang"])
                         wa_send_list(user, h, b, btn, rows)
@@ -1369,7 +1388,6 @@ async def incoming(req: Request):
 
                 # ===== VILLAS → CAT =====
                 if state["step"] == "villa_cat":
-                    rid = (reply_id or "").upper()
                     valid = ("VILLA_3_6","VILLA_7_10","VILLA_11_14","VILLA_15P")
                     if rid not in valid:
                         h,b,btn,rows = villa_categories(state["lang"])
@@ -1389,7 +1407,6 @@ async def incoming(req: Request):
 
                 # ===== WEDDINGS → invitados =====
                 if state["step"] == "wed_guests":
-                    rid = (reply_id or "").upper()
                     if rid not in ("WED_PAX_50","WED_PAX_100","WED_PAX_200","WED_PAX_201","WED_PAX_UNK"):
                         h,b,btn,rows = weddings_guests_list(state["lang"])
                         wa_send_list(user, h, b, btn, rows)
@@ -1447,8 +1464,7 @@ async def incoming(req: Request):
 
                 # ===== POST RESULTADOS =====
                 if state["step"] == "post_results":
-                    rid = (reply_id or "").upper()
-
+                    # Entrada libre: mezcla de botes (p.ej. "1 lancha y 1 cat")
                     if (state.get("service_type") == "boats") and txt_raw and not rid:
                         mix = parse_boat_mix(txt_raw)
                         if mix:
@@ -1485,8 +1501,7 @@ async def incoming(req: Request):
                             continue
 
                     if rid == "POST_ADD_SERVICE":
-                        state["step"] = "menu"
-                        set_session(user, state)
+                        reset_to_menu(state, user)
                         h,b,btn,rows = main_menu_list(state["lang"], state["city"])
                         wa_send_list(user, h, b, btn, rows)
                         continue
@@ -1506,8 +1521,7 @@ async def incoming(req: Request):
                         continue
 
                     if rid == "POST_MENU":
-                        state["step"] = "menu"
-                        set_session(user, state)
+                        reset_to_menu(state, user)
                         h,b,btn,rows = main_menu_list(state["lang"], state["city"])
                         wa_send_list(user, h, b, btn, rows)
                         continue
