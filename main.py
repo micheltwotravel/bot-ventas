@@ -447,18 +447,42 @@ def hubspot_find_or_create_contact(name: str, email: str, phone: str, lang: str)
     base = "https://api.hubapi.com/crm/v3/objects/contacts"
     headers = {"Authorization": f"Bearer {HUBSPOT_TOKEN}", "Content-Type": "application/json"}
 
+    # === 1) Validación previa del email ===
+    if email:
+        clean_email = sanitize_email_input(email)
+        if not EMAIL_RE.match(clean_email):
+            print(f"⚠️ Email inválido o incompleto: {clean_email}. Se omitirá y no se usará en HubSpot.")
+            clean_email = None
+        elif "." not in clean_email.split("@")[-1]:
+            print(f"⚠️ Email sin dominio completo: {clean_email}. Se omitirá.")
+            clean_email = None
+        email = clean_email or None
+    else:
+        email = None
+
     cid = None
+
+    # === 2) Buscar contacto existente por email (si es válido) ===
     if email:
         try:
-            s = requests.post(f"{base}/search", headers=headers, json={
-                "filterGroups":[{"filters":[{"propertyName":"email","operator":"EQ","value":email}]}],
-                "properties":["email"]
-            }, timeout=20)
+            s = requests.post(
+                f"{base}/search",
+                headers=headers,
+                json={
+                    "filterGroups": [
+                        {"filters": [{"propertyName": "email", "operator": "EQ", "value": email}]}
+                    ],
+                    "properties": ["email"]
+                },
+                timeout=20
+            )
             if s.ok and s.json().get("results"):
                 cid = s.json()["results"][0]["id"]
+                print(f"ℹ️ Contacto existente encontrado: {cid}")
         except Exception as e:
-            print("HubSpot search error:", e)
+            print("❌ HubSpot search error:", e)
 
+    # === 3) Propiedades del contacto ===
     props = {
         "email": email or None,
         "firstname": (name.split()[0] if name else None),
@@ -469,24 +493,27 @@ def hubspot_find_or_create_contact(name: str, email: str, phone: str, lang: str)
         "hs_language": ("es" if (lang or "").upper().startswith("ES") else "en"),
     }
 
+    # === 4) Actualizar si ya existía ===
     if cid:
         try:
             up = requests.patch(f"{base}/{cid}", headers=headers, json={"properties": props}, timeout=20)
             print("HubSpot contact update:", up.status_code, up.text[:150])
             return cid if up.ok else None
         except Exception as e:
-            print("HubSpot contact update error:", e)
+            print("❌ HubSpot contact update error:", e)
             return None
 
+    # === 5) Crear nuevo contacto ===
     try:
         r = requests.post(base, headers=headers, json={"properties": props}, timeout=20)
         if r.status_code == 201:
             cid = r.json().get("id")
-            print("HubSpot contact created", cid)
+            print("✅ HubSpot contact created:", cid)
             return cid
-        print("HubSpot contact error:", r.status_code, r.text[:200])
+        print("❌ HubSpot contact error:", r.status_code, r.text[:200])
     except Exception as e:
-        print("HubSpot contact create error:", e)
+        print("❌ HubSpot contact create error:", e)
+
     return None
 
 def hubspot_create_deal(contact_id, owner_id, title, desc):
