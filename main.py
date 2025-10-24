@@ -454,8 +454,7 @@ def hubspot_find_or_create_contact(name: str, email: str, phone: str, lang: str)
         "phone": phone,
         "hs_lead_status": "NEW",
         "lifecyclestage": "lead",
-        "preferred_language": ("es" if (lang or "").upper().startswith("ES") else "en"),
-        "source": "WhatsApp Bot",
+        "hs_language": ("es" if (lang or "").upper().startswith("ES") else "en"),
     }
 
     if cid:
