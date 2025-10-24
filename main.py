@@ -25,6 +25,18 @@ if REDIS_URL:
 
 SESSIONS = {}   # fallback en memoria (por si no hay Redis)
 SESSION_TTL_SECS = 60 * 60  # 1 hora
+def deal_title_from_state(state: dict) -> str:
+    name = (state.get("name") or "Guest").strip()
+    svc  = (state.get("service_type") or "").title().strip()
+    city = (state.get("city") or "").title().strip()
+    date = (state.get("date") or "").strip()
+
+    parts = [name]
+    if svc:  parts.append(svc)
+    if city: parts.append(city)
+    if date: parts.append(date)
+
+    return " — ".join(parts)
 
 def _rkey(user: str) -> str:
     # Clave estable: sólo dígitos del número
@@ -1466,7 +1478,7 @@ async def incoming(req: Request):
                     notify_sales(f"Lead {svc.title()}", state, user, cal_url=cal_url, owner_name=owner_name, pretty_city=pretty_city)
                     try:
                         if state.get("contact_id"):
-                            deal_title = f"{(svc or '').title()} – {state.get('city') or ''} – {wa_click_number(user)}"
+                            deal_title = deal_title_from_state(state)
                             deal_desc  = build_history_lines(state) or f"Lead from WhatsApp. Lang: {state.get('lang','-')}"
                             hubspot_create_deal(
                                 contact_id=state["contact_id"],
