@@ -1065,6 +1065,9 @@ async def verify_webhook(request: Request):
         return PlainTextResponse(challenge, status_code=200)
     return PlainTextResponse("Forbidden", status_code=403)
 
+
+# ==================== WEBHOOK RECEIVER (POST) ====================
+@app.post("/wa-webhook")
 async def incoming(req: Request):
     data = await req.json()
     print("Incoming:", data)
