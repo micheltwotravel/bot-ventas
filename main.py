@@ -1052,7 +1052,19 @@ async def show_routes():
 def root():
     return {"ok": True, "routes": [r.path for r in app.router.routes]}
 
-@app.post("/wa-webhook")
+# ==================== WEBHOOK VERIFICATION (GET) ====================
+@app.get("/wa-webhook")
+async def verify_webhook(request: Request):
+    mode = request.query_params.get("hub.mode")
+    token = request.query_params.get("hub.verify_token")
+    challenge = request.query_params.get("hub.challenge")
+
+    print("VERIFY>", mode, token, challenge)
+
+    if mode == "subscribe" and token == VERIFY_TOKEN and challenge:
+        return PlainTextResponse(challenge, status_code=200)
+    return PlainTextResponse("Forbidden", status_code=403)
+
 async def incoming(req: Request):
     data = await req.json()
     print("Incoming:", data)
