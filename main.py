@@ -1465,7 +1465,22 @@ async def incoming(req: Request):
 
                     owner_name, owner_id, cal_url, pretty_city, wa_num = owner_for_city(state["city"])
                     notify_sales(f"Lead {svc.title()}", state, user, cal_url=cal_url, owner_name=owner_name, pretty_city=pretty_city)
-
+                    try:
+                        if state.get("contact_id"):
+                            deal_title = f"{(svc or '').title()} – {state.get('city') or ''} – {wa_click_number(user)}"
+                            deal_desc  = build_history_lines(state) or f"Lead from WhatsApp. Lang: {state.get('lang','-')}"
+                            hubspot_create_deal(
+                                contact_id=state["contact_id"],
+                                owner_id=HUBSPOT_OWNER_RAY,
+                                title=deal_title,
+                                desc=deal_desc,
+                            )
+                            print("✅ Deal creado y asignado a Ray")
+                        else:
+                            print("⚠️ No hay contact_id; se omite creación de Deal")
+                    except Exception as e:
+                        print("❌ Error creando el Deal:", e)
+                        
                     if not top:
                         msg = handoff_full_message(state, owner_name, wa_num, cal_url, pretty_city)
                         wa_send_text(user, msg)
