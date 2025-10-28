@@ -189,6 +189,15 @@ def norm(s: str) -> str:
     s = re.sub(r"\s+", " ", s)
     return s
 
+# ======= SKIP WORDS (texto libre) =======
+SKIP_WORDS = {
+    "skip","saltar","omitir","omito","no tengo","luego","después","despues",
+    "aun no","aún no","todavia no","todavía no","n/a","na","tbd"
+}
+def is_skip_text(s: str) -> bool:
+    return norm(s) in {norm(x) for x in SKIP_WORDS}
+
+
 # ==================== Helpers de nombre ====================
 def valid_name(fullname: str) -> bool:
     tokens = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ']{2,}", (fullname or ""))
@@ -1225,6 +1234,30 @@ async def incoming(req: Request):
                             wa_send_list(user, h, b, btn, rows)
                             continue
 
+                    # Texto libre: aceptar saltar/skip/omitir
+                    if txt_raw and is_skip_text(txt_raw):
+                        state["email"] = ""
+                        state["contact_id"] = hubspot_find_or_create_contact(
+                            state.get("name"), "", user, state.get("lang")
+                        )
+                        state["step"] = "city"
+                        set_session(user, state)
+                        h,b,btn,rows = city_list(state["lang"])
+                        wa_send_list(user, h, b, btn, rows)
+                        continue
+
+                    # Texto libre equivalente al botón "Usar mi WhatsApp"
+                    if norm(txt_raw) in {"usar mi whatsapp","use my whatsapp","usar whatsapp"}:
+                        state["email"] = f"{user}@whatsapp"
+                        state["contact_id"] = hubspot_find_or_create_contact(
+                            state.get("name"), state["email"], user, state.get("lang")
+                        )
+                        state["step"] = "city"
+                        set_session(user, state)
+                        h,b,btn,rows = city_list(state["lang"])
+                        wa_send_list(user, h, b, btn, rows)
+                        continue
+
                     if rid == "EMAIL_ENTER":
                         state["step"] = "contact_email_enter"
                         set_session(user, state)
@@ -1262,8 +1295,20 @@ async def incoming(req: Request):
 
                 # ===== 2b) Email (enter) =====
                 if state["step"] == "contact_email_enter":
+                    # Permitir saltar desde texto libre
+                    if txt_raw and is_skip_text(txt_raw):
+                        state["email"] = ""
+                        state["contact_id"] = hubspot_find_or_create_contact(
+                            state.get("name"), "", user, state.get("lang")
+                        )
+                        state["step"] = "city"
+                        set_session(user, state)
+                        h,b,btn,rows = city_list(state["lang"])
+                        wa_send_list(user, h, b, btn, rows)
+                        continue
+
                     candidate = sanitize_email_input(txt_raw)
-                    if not EMAIL_RE.match(candidate):
+                    if not EMAIL_RE.match(candidate or ""):
                         embedded = extract_first_email(txt_raw)
                         if embedded:
                             candidate = sanitize_email_input(embedded)
@@ -1339,7 +1384,7 @@ async def incoming(req: Request):
                     if state["service_type"] == "boats":
                         state["step"] = "boat_cat"
                         set_session(user, state)
-                        wa_send_text(user, "Perfecto, veamos tipos de bote…" if is_es(state["lang"]) else "Great—let’s pick a boat type…")
+                        wa_send_text(user, "Perfecto, veamos tipos de bote…" if is_es(state["lang"]) else "Great, let’s pick a boat type…")
                         h,b,btn,rows = boat_categories(state["lang"])
                         wa_send_list(user, h, b, btn, rows)
                         continue
@@ -1384,7 +1429,7 @@ async def incoming(req: Request):
                         wa_send_list(user, h, b, btn, rows)
                         continue
 
-                    # ⛵️ Si NO SÉ → conectar directo con Ray (sin pedir pax/fecha)
+                    # NO SÉ → conectar directo con Ray
                     if rid == "BOAT_UNSURE":
                         owner_name, owner_id, cal_url, pretty_city, wa_num = owner_for_city(state["city"])
                         msg = handoff_full_message(state, owner_name, wa_num, cal_url, pretty_city)
@@ -1399,7 +1444,7 @@ async def incoming(req: Request):
                         )
                         continue
 
-                    # El resto sigue normal (ALL activa mezcla 1-1-1 en filter_catalog)
+                    # El resto sigue normal
                     state["category_tag"] = {
                         "BOAT_SPEED":"type_speedboat",
                         "BOAT_YACHT":"type_yacht",
@@ -1518,7 +1563,7 @@ async def incoming(req: Request):
                             print("⚠️ No hay contact_id; se omite creación de Deal")
                     except Exception as e:
                         print("❌ Error creando el Deal:", e)
-                        
+
                     if not top:
                         msg = handoff_full_message(state, owner_name, wa_num, cal_url, pretty_city)
                         wa_send_text(user, msg)
@@ -1602,4 +1647,3 @@ async def incoming(req: Request):
                     continue
 
     return {"ok": True}
-
