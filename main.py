@@ -7,6 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
 from datetime import datetime
 from zoneinfo import ZoneInfo
+import anthropic
 # ==================== APP ====================
 app = FastAPI()
 # ==== SESSIONS (persistente con Redis + fallback en memoria) ====
@@ -120,23 +121,27 @@ BOT_NAME = (os.getenv("BOT_NAME") or "Luna").strip()
 
 # HubSpot
 HUBSPOT_TOKEN       = (os.getenv("HUBSPOT_TOKEN") or "").strip()
-HUBSPOT_OWNER_SOFIA = (os.getenv("HUBSPOT_OWNER_SOFIA") or "").strip()
 HUBSPOT_OWNER_ROSS  = (os.getenv("HUBSPOT_OWNER_ROSS")  or "").strip()
 HUBSPOT_OWNER_RAY   = (os.getenv("HUBSPOT_OWNER_RAY")   or "").strip()
 HUBSPOT_PIPELINE_ID  = (os.getenv("HUBSPOT_PIPELINE_ID")  or "").strip()
 HUBSPOT_DEALSTAGE_ID = (os.getenv("HUBSPOT_DEALSTAGE_ID") or "").strip()
 
-# Calendarios (opcional mostrar)
-CAL_RAY   = (os.getenv("CAL_RAY")   or "https://meetings.hubspot.com/ray-kanevsky").strip()
+# Calendarios
+CAL_RAY  = (os.getenv("CAL_RAY")  or "https://meetings.hubspot.com/ray-kanevsky").strip()
+CAL_ROSS = (os.getenv("CAL_ROSS") or "").strip()
 
-# Dueño global único (todo cae con Ray)
-# ✅ Corrección pedida: sin "Mr." y con nombre bien escrito.
-OWNER_GLOBAL_NAME = "Ray Kanevsky"
-OWNER_GLOBAL_WA   = (os.getenv("OWNER_GLOBAL_WA") or "+1 212 653 0000").strip()
+# Owners
+OWNER_RAY_NAME  = "Ray Kanevsky"
+OWNER_RAY_WA    = (os.getenv("OWNER_GLOBAL_WA") or "+1 212 653 0000").strip()
+OWNER_ROSS_NAME = "Ross"
+OWNER_ROSS_WA   = (os.getenv("OWNER_ROSS_WA") or "").strip()
 
 # Catálogo
 GOOGLE_SHEET_CSV_URL = (os.getenv("GOOGLE_SHEET_CSV_URL") or "").strip()
 TOP_K = int(os.getenv("TOP_K", "3"))
+
+# Anthropic / Claude
+ANTHROPIC_API_KEY = (os.getenv("ANTHROPIC_API_KEY") or "").strip()
 
 # Correo ventas (SMTP)
 SMTP_HOST    = (os.getenv("SMTP_HOST") or "").strip()
@@ -326,6 +331,53 @@ def canonical_service(service: str) -> str:
         "concierge": "concierge", "team": "team"
     }
     return aliases.get(x, x)
+
+# ==================== CLAUDE / LUNA AI ====================
+LUNA_SYSTEM = """You are Luna, a friendly and professional sales assistant for Two Travel — a luxury concierge and travel company operating in Cartagena, Medellín, Tulum, and Mexico City.
+
+Two Travel offers: Villas (luxury rentals), Boats/Yachts, Private Islands, Weddings, Concierge services, and Team building experiences.
+
+Your job:
+- Answer general questions about services and destinations warmly and briefly
+- Keep responses SHORT (2-4 sentences max) — this is WhatsApp, not email
+- Respond in the same language the user writes in (Spanish or English)
+- You are NOT a general AI assistant — stay focused on Two Travel services only
+
+STRICT RULES — never break these:
+- NEVER mention prices, rates, or costs — always say the team will send exact pricing
+- NEVER confirm availability or specific dates — always defer to the team
+- NEVER invent options, packages, or details not explicitly known
+- For ANY question about price, availability, or booking specifics, say something like: "Our team will reach out with exact details — they'll have everything you need!" (or Spanish equivalent)
+- When in doubt, or for any price/availability/booking question, offer to connect the user with the team: Ross handles Cartagena, Ray handles everything else (Medellín, Tulum, Mexico City)
+"""
+
+def luna_ai_reply(user_message: str, state: dict) -> str:
+    if not ANTHROPIC_API_KEY:
+        return ""
+    try:
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        context_bits = []
+        if state.get("name"):
+            context_bits.append(f"Client name: {state['name']}")
+        if state.get("city"):
+            context_bits.append(f"Interested city: {state['city']}")
+        if state.get("service_type"):
+            context_bits.append(f"Service interest: {state['service_type']}")
+        if state.get("lang"):
+            context_bits.append(f"Language preference: {state['lang']}")
+        system = LUNA_SYSTEM
+        if context_bits:
+            system += "\n\nCurrent client context:\n" + "\n".join(context_bits)
+        msg = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=300,
+            system=system,
+            messages=[{"role": "user", "content": user_message}],
+        )
+        return (msg.content[0].text or "").strip()
+    except Exception as e:
+        print("Claude error:", e)
+        return ""
 
 # ==================== WHATSAPP HELPERS ====================
 def _post_graph(path: str, payload: dict):
@@ -555,10 +607,7 @@ def hubspot_create_deal(contact_id, owner_id, title, desc):
 
 def owner_for_city(city: str):
     pretty = city or "—"
-    name = OWNER_GLOBAL_NAME
-    wa   = OWNER_GLOBAL_WA
-    cal  = CAL_RAY or ""
-    return (name, HUBSPOT_OWNER_RAY or None, cal, pretty, wa)
+    return (OWNER_RAY_NAME, HUBSPOT_OWNER_RAY or None, CAL_RAY or "", pretty, OWNER_RAY_WA)
 
 # ==================== CATÁLOGO ====================
 def load_catalog():
@@ -1207,6 +1256,23 @@ async def incoming(req: Request):
                         continue
                     state["name"] = normalize_name(txt_raw)
                     state["step"] = "contact_email_choice"
+                    # Crear contacto y deal tan pronto tengamos nombre + teléfono
+                    try:
+                        if not state.get("contact_id"):
+                            state["contact_id"] = hubspot_find_or_create_contact(
+                                state["name"], "", user, state.get("lang")
+                            )
+                        if state.get("contact_id") and not state.get("early_deal_id"):
+                            early_deal_id = hubspot_create_deal(
+                                contact_id=state["contact_id"],
+                                owner_id=HUBSPOT_OWNER_RAY,
+                                title=f"{state['name']} — WhatsApp Lead",
+                                desc=f"Early lead captured. Phone: {user}. Lang: {state.get('lang','-')}",
+                            )
+                            state["early_deal_id"] = early_deal_id
+                            print(f"✅ Early deal creado al capturar nombre: {early_deal_id}")
+                    except Exception as e:
+                        print("❌ Error creando early deal:", e)
                     set_session(user, state)
                     wa_send_text(user, ask_email(state["lang"]))
                     wa_send_buttons(user, " ", email_buttons(state["lang"]))
@@ -1399,6 +1465,24 @@ async def incoming(req: Request):
                         wa_send_text(user, format_results(state["lang"], top, lbl, service_type="islands", city=state["city"]))
                         owner_name, owner_id, cal_url, pretty_city, wa_num = owner_for_city(state["city"])
                         notify_sales("Lead Islands", state, user, cal_url=cal_url, owner_name=owner_name, pretty_city=pretty_city)
+                        try:
+                            if not state.get("contact_id"):
+                                state["contact_id"] = hubspot_find_or_create_contact(
+                                    state.get("name"), state.get("email",""), user, state.get("lang")
+                                )
+                                set_session(user, state)
+                            if state.get("contact_id"):
+                                hubspot_create_deal(
+                                    contact_id=state["contact_id"],
+                                    owner_id=HUBSPOT_OWNER_RAY,
+                                    title=deal_title_from_state(state),
+                                    desc=f"Lead Islands from WhatsApp. Lang: {state.get('lang','-')}",
+                                )
+                                print("✅ Deal creado para Islands")
+                            else:
+                                print("⚠️ No hay contact_id; se omite creación de Deal")
+                        except Exception as e:
+                            print("❌ Error creando el Deal:", e)
                         wa_send_buttons(
                             user,
                             "¿Cómo podemos seguir ayudándote?" if is_es(state["lang"]) else "How can we keep helping?",
@@ -1419,6 +1503,27 @@ async def incoming(req: Request):
                         owner_name, owner_id, cal_url, pretty_city, wa_num = owner_for_city(state["city"])
                         msg = handoff_full_message(state, owner_name, wa_num, cal_url, pretty_city)
                         wa_send_text(user, msg)
+                        notify_sales(f"Lead {state['service_type'].title()}", state, user, cal_url=cal_url, owner_name=owner_name, pretty_city=pretty_city)
+                        try:
+                            if not state.get("contact_id"):
+                                state["contact_id"] = hubspot_find_or_create_contact(
+                                    state.get("name"), state.get("email",""), user, state.get("lang")
+                                )
+                                set_session(user, state)
+                            if state.get("contact_id"):
+                                deal_title = deal_title_from_state(state)
+                                deal_desc  = f"Lead {state['service_type'].title()} from WhatsApp. Lang: {state.get('lang','-')}"
+                                hubspot_create_deal(
+                                    contact_id=state["contact_id"],
+                                    owner_id=HUBSPOT_OWNER_RAY,
+                                    title=deal_title,
+                                    desc=deal_desc,
+                                )
+                                print(f"✅ Deal creado para {state['service_type']}")
+                            else:
+                                print("⚠️ No hay contact_id; se omite creación de Deal")
+                        except Exception as e:
+                            print("❌ Error creando el Deal:", e)
                         continue
 
                 # ===== BOATS → categoría =====
@@ -1434,6 +1539,25 @@ async def incoming(req: Request):
                         owner_name, owner_id, cal_url, pretty_city, wa_num = owner_for_city(state["city"])
                         msg = handoff_full_message(state, owner_name, wa_num, cal_url, pretty_city)
                         wa_send_text(user, msg)
+                        notify_sales("Lead Boats (unsure)", state, user, cal_url=cal_url, owner_name=owner_name, pretty_city=pretty_city)
+                        try:
+                            if not state.get("contact_id"):
+                                state["contact_id"] = hubspot_find_or_create_contact(
+                                    state.get("name"), state.get("email",""), user, state.get("lang")
+                                )
+                                set_session(user, state)
+                            if state.get("contact_id"):
+                                hubspot_create_deal(
+                                    contact_id=state["contact_id"],
+                                    owner_id=HUBSPOT_OWNER_RAY,
+                                    title=deal_title_from_state(state),
+                                    desc=f"Lead Boats (unsure type) from WhatsApp. Lang: {state.get('lang','-')}",
+                                )
+                                print("✅ Deal creado para Boats (unsure)")
+                            else:
+                                print("⚠️ No hay contact_id; se omite creación de Deal")
+                        except Exception as e:
+                            print("❌ Error creando el Deal:", e)
                         wa_send_buttons(
                             user,
                             "¿Qué más necesitas?" if is_es(state["lang"]) else "What else do you need?",
@@ -1639,11 +1763,31 @@ async def incoming(req: Request):
                         wa_send_list(user, h, b, btn, rows)
                         continue
 
+                    # Texto libre en post_results → respuesta con IA
+                    if txt_raw and not rid:
+                        ai_reply = luna_ai_reply(txt_raw, state)
+                        if ai_reply:
+                            wa_send_text(user, ai_reply)
+                        wa_send_buttons(
+                            user,
+                            "¿Quieres añadir otro servicio o hablar con el equipo?" if is_es(state["lang"]) else "Would you like to add another service or talk to the team?",
+                            after_results_buttons(state["lang"])
+                        )
+                        continue
+
                     wa_send_buttons(
                         user,
                         "¿Quieres añadir otro servicio o hablar con el equipo?" if is_es(state["lang"]) else "Would you like to add another service or talk to the team?",
                         after_results_buttons(state["lang"])
                     )
+                    continue
+
+                # ===== FALLBACK con IA =====
+                # Si llegamos aquí sin haber hecho continue, el usuario escribió algo inesperado
+                if txt_raw and not rid:
+                    ai_reply = luna_ai_reply(txt_raw, state)
+                    if ai_reply:
+                        wa_send_text(user, ai_reply)
                     continue
 
     return {"ok": True}
