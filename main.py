@@ -1159,11 +1159,11 @@ def followup_message(state: dict) -> str:
     if is_es(lang):
         return (f"{greeting} Soy Luna de Two Travel 🌴\n"
                 "Quedamos a medias — ¿te ayudo a encontrar lo que buscas?\n"
-                "Solo dime en qué ciudad y qué servicio te interesa 😊")
+                "Si prefieres, también puedo conectarte directamente con uno de nuestros asesores 😊")
     else:
         return (f"{greeting} It's Luna from Two Travel 🌴\n"
                 "We got cut off — can I help you find what you're looking for?\n"
-                "Just let me know which city and service interests you 😊")
+                "I can also connect you directly with one of our team members if you prefer 😊")
 
 @app.get("/cron/followup")
 async def cron_followup(request: Request):
