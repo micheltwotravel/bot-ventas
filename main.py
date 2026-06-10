@@ -94,6 +94,7 @@ def get_session(user: str) -> dict | None:
     return SESSIONS.get(user)
 
 def set_session(user: str, state: dict):
+    state["last_activity"] = datetime.now(ZoneInfo("America/Bogota")).isoformat()
     if _redis:
         try:
             _redis.setex(_rkey(user), SESSION_TTL_SECS, json.dumps(state))
@@ -1147,6 +1148,93 @@ async def show_routes():
 @app.get("/")
 def root():
     return {"ok": True, "routes": [r.path for r in app.router.routes]}
+
+# ==================== FOLLOW-UP CRON ====================
+FOLLOWUP_TOKEN = (os.getenv("FOLLOWUP_TOKEN") or "followup-secret").strip()
+
+def followup_message(state: dict) -> str:
+    lang = state.get("lang", "EN")
+    name = state.get("name") or ""
+    greeting = f"Hey {name}! 👋" if name else "Hey! 👋"
+    if is_es(lang):
+        return (f"{greeting} Soy Luna de Two Travel 🌴\n"
+                "Quedamos a medias — ¿te ayudo a encontrar lo que buscas?\n"
+                "Solo dime en qué ciudad y qué servicio te interesa 😊")
+    else:
+        return (f"{greeting} It's Luna from Two Travel 🌴\n"
+                "We got cut off — can I help you find what you're looking for?\n"
+                "Just let me know which city and service interests you 😊")
+
+@app.get("/cron/followup")
+async def cron_followup(request: Request):
+    token = request.query_params.get("token", "")
+    if token != FOLLOWUP_TOKEN:
+        return {"error": "unauthorized"}, 403
+
+    now = datetime.now(ZoneInfo("America/Bogota"))
+    hour = now.hour
+    if hour < 9 or hour >= 20:
+        return {"skipped": "outside business hours", "hour": hour}
+
+    if not _redis:
+        return {"skipped": "no redis"}
+
+    sent = 0
+    skipped = 0
+    try:
+        keys = _redis.keys("two_travel:wa:s:*")
+        for key in keys:
+            raw = _redis.get(key)
+            if not raw:
+                continue
+            state = json.loads(raw)
+
+            # Ya completó el flujo o ya se mandó follow-up → skip
+            if state.get("follow_up_sent"):
+                skipped += 1
+                continue
+
+            # Solo leads que dieron al menos su nombre
+            if not state.get("name"):
+                skipped += 1
+                continue
+
+            # Verificar inactividad de 24h
+            last_str = state.get("last_activity")
+            if not last_str:
+                skipped += 1
+                continue
+            try:
+                last_dt = datetime.fromisoformat(last_str)
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=ZoneInfo("America/Bogota"))
+            except:
+                skipped += 1
+                continue
+
+            hours_inactive = (now - last_dt).total_seconds() / 3600
+            if hours_inactive < 24:
+                skipped += 1
+                continue
+
+            # Extraer número de teléfono desde la key
+            phone = key.split("two_travel:wa:s:")[-1]
+            if not phone:
+                skipped += 1
+                continue
+
+            msg = followup_message(state)
+            wa_send_text(phone, msg)
+            state["follow_up_sent"] = True
+            _redis.setex(key, SESSION_TTL_SECS, json.dumps(state))
+            print(f"✅ Follow-up sent to {phone}")
+            sent += 1
+
+    except Exception as e:
+        print("Follow-up cron error:", e)
+        return {"error": str(e)}
+
+    return {"sent": sent, "skipped": skipped}
 
 # ==================== WEBHOOK VERIFICATION (GET) ====================
 @app.get("/wa-webhook")
