@@ -578,6 +578,33 @@ def hubspot_find_or_create_contact(name: str, email: str, phone: str, lang: str)
 
     return None
 
+def hubspot_upsert_deal(state: dict, title: str, desc: str):
+    """Actualiza el early deal si existe, si no crea uno nuevo."""
+    early_id = state.get("early_deal_id")
+    if early_id:
+        hubspot_update_deal(early_id, title, desc)
+        print(f"✅ Early deal actualizado: {early_id}")
+        return early_id
+    contact_id = state.get("contact_id")
+    if contact_id:
+        new_id = hubspot_create_deal(contact_id, HUBSPOT_OWNER_RAY, title, desc)
+        print(f"✅ Deal creado: {new_id}")
+        return new_id
+    return None
+
+def hubspot_update_deal(deal_id, title, desc):
+    if not HUBSPOT_TOKEN or not deal_id:
+        return False
+    headers = {"Authorization": f"Bearer {HUBSPOT_TOKEN}", "Content-Type": "application/json"}
+    props = {"dealname": title[:250], "description": desc[:65530]}
+    try:
+        r = requests.patch(f"https://api.hubapi.com/crm/v3/objects/deals/{deal_id}", headers=headers, json={"properties": props}, timeout=20)
+        print(f"Deal updated {deal_id}:", r.status_code)
+        return r.ok
+    except Exception as e:
+        print("HubSpot deal update error:", e)
+        return False
+
 def hubspot_create_deal(contact_id, owner_id, title, desc):
     if not HUBSPOT_TOKEN:
         print("WARN: HUBSPOT_TOKEN missing")
@@ -1560,13 +1587,8 @@ async def incoming(req: Request):
                                 )
                                 set_session(user, state)
                             if state.get("contact_id"):
-                                hubspot_create_deal(
-                                    contact_id=state["contact_id"],
-                                    owner_id=HUBSPOT_OWNER_RAY,
-                                    title=deal_title_from_state(state),
-                                    desc=f"Lead Islands from WhatsApp. Lang: {state.get('lang','-')}",
-                                )
-                                print("✅ Deal creado para Islands")
+                                hubspot_upsert_deal(state, deal_title_from_state(state), f"Lead Islands from WhatsApp. Lang: {state.get('lang','-')}")
+                                print("✅ Deal upsert para Islands")
                             else:
                                 print("⚠️ No hay contact_id; se omite creación de Deal")
                         except Exception as e:
@@ -1599,15 +1621,8 @@ async def incoming(req: Request):
                                 )
                                 set_session(user, state)
                             if state.get("contact_id"):
-                                deal_title = deal_title_from_state(state)
-                                deal_desc  = f"Lead {state['service_type'].title()} from WhatsApp. Lang: {state.get('lang','-')}"
-                                hubspot_create_deal(
-                                    contact_id=state["contact_id"],
-                                    owner_id=HUBSPOT_OWNER_RAY,
-                                    title=deal_title,
-                                    desc=deal_desc,
-                                )
-                                print(f"✅ Deal creado para {state['service_type']}")
+                                hubspot_upsert_deal(state, deal_title_from_state(state), f"Lead {state['service_type'].title()} from WhatsApp. Lang: {state.get('lang','-')}")
+                                print(f"✅ Deal upsert para {state['service_type']}")
                             else:
                                 print("⚠️ No hay contact_id; se omite creación de Deal")
                         except Exception as e:
@@ -1635,13 +1650,8 @@ async def incoming(req: Request):
                                 )
                                 set_session(user, state)
                             if state.get("contact_id"):
-                                hubspot_create_deal(
-                                    contact_id=state["contact_id"],
-                                    owner_id=HUBSPOT_OWNER_RAY,
-                                    title=deal_title_from_state(state),
-                                    desc=f"Lead Boats (unsure type) from WhatsApp. Lang: {state.get('lang','-')}",
-                                )
-                                print("✅ Deal creado para Boats (unsure)")
+                                hubspot_upsert_deal(state, deal_title_from_state(state), f"Lead Boats (unsure type) from WhatsApp. Lang: {state.get('lang','-')}")
+                                print("✅ Deal upsert para Boats (unsure)")
                             else:
                                 print("⚠️ No hay contact_id; se omite creación de Deal")
                         except Exception as e:
@@ -1764,13 +1774,8 @@ async def incoming(req: Request):
                         if state.get("contact_id"):
                             deal_title = deal_title_from_state(state)
                             deal_desc  = build_history_lines(state) or f"Lead from WhatsApp. Lang: {state.get('lang','-')}"
-                            hubspot_create_deal(
-                                contact_id=state["contact_id"],
-                                owner_id=HUBSPOT_OWNER_RAY,
-                                title=deal_title,
-                                desc=deal_desc,
-                            )
-                            print("✅ Deal creado y asignado a Ray")
+                            hubspot_upsert_deal(state, deal_title, deal_desc)
+                            print("✅ Deal upsert asignado a Ray")
                         else:
                             print("⚠️ No hay contact_id; se omite creación de Deal")
                     except Exception as e:
