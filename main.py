@@ -578,19 +578,69 @@ def hubspot_find_or_create_contact(name: str, email: str, phone: str, lang: str)
 
     return None
 
-def hubspot_upsert_deal(state: dict, title: str, desc: str):
-    """Actualiza el early deal si existe, si no crea uno nuevo."""
+def hubspot_log_note(contact_id: str, deal_id: str, note: str):
+    if not HUBSPOT_TOKEN or not note:
+        return
+    headers = {"Authorization": f"Bearer {HUBSPOT_TOKEN}", "Content-Type": "application/json"}
+    try:
+        r = requests.post(
+            "https://api.hubapi.com/crm/v3/objects/notes",
+            headers=headers,
+            json={"properties": {"hs_note_body": note, "hs_timestamp": datetime.now(ZoneInfo("America/Bogota")).isoformat()}},
+            timeout=20
+        )
+        note_id = r.json().get("id")
+        if note_id and contact_id:
+            requests.put(f"https://api.hubapi.com/crm/v3/objects/notes/{note_id}/associations/contacts/{contact_id}/note_to_contact", headers=headers, json={}, timeout=10)
+        if note_id and deal_id:
+            requests.put(f"https://api.hubapi.com/crm/v3/objects/notes/{note_id}/associations/deals/{deal_id}/note_to_deal", headers=headers, json={}, timeout=10)
+        print(f"✅ Nota logueada en HubSpot: {note_id}")
+    except Exception as e:
+        print("HubSpot note error:", e)
+
+def build_wa_note(state: dict, phone: str) -> str:
+    """Construye nota legible con todo lo que Luna capturó del cliente."""
+    lines = ["📱 *Lead capturado por Luna (WhatsApp)*", ""]
+    lines.append(f"• Teléfono: {phone}")
+    if state.get("name"):    lines.append(f"• Nombre: {state['name']}")
+    if state.get("email"):   lines.append(f"• Email: {state['email']}")
+    if state.get("lang"):    lines.append(f"• Idioma: {state['lang']}")
+    if state.get("city"):    lines.append(f"• Ciudad: {state['city'].title()}")
+    if state.get("service_type"): lines.append(f"• Servicio: {state['service_type'].title()}")
+    if state.get("category_tag"): lines.append(f"• Preferencia: {state['category_tag']}")
+    if state.get("pax"):     lines.append(f"• Personas: {state['pax']}")
+    if state.get("date"):    lines.append(f"• Fecha: {state['date']}")
+    hist = build_history_lines(state)
+    if hist:
+        lines.append("")
+        lines.append("Historial de interés:")
+        lines.append(hist)
+    step = state.get("step", "")
+    if step not in ("post_results", "date"):
+        lines.append("")
+        lines.append(f"⚠️ Cliente abandonó en el paso: {step}")
+    return "\n".join(lines)
+
+def hubspot_upsert_deal(state: dict, title: str, desc: str, phone: str = ""):
+    """Actualiza el early deal si existe, si no crea uno nuevo. Siempre loguea nota."""
     early_id = state.get("early_deal_id")
+    contact_id = state.get("contact_id")
+    deal_id = None
+
     if early_id:
         hubspot_update_deal(early_id, title, desc)
         print(f"✅ Early deal actualizado: {early_id}")
-        return early_id
-    contact_id = state.get("contact_id")
-    if contact_id:
-        new_id = hubspot_create_deal(contact_id, HUBSPOT_OWNER_RAY, title, desc)
-        print(f"✅ Deal creado: {new_id}")
-        return new_id
-    return None
+        deal_id = early_id
+    elif contact_id:
+        deal_id = hubspot_create_deal(contact_id, HUBSPOT_OWNER_RAY, title, desc)
+        print(f"✅ Deal creado: {deal_id}")
+
+    # Log nota con todo el contexto de WhatsApp
+    if deal_id and phone:
+        note = build_wa_note(state, phone)
+        hubspot_log_note(contact_id, deal_id, note)
+
+    return deal_id
 
 def hubspot_update_deal(deal_id, title, desc):
     if not HUBSPOT_TOKEN or not deal_id:
@@ -1587,7 +1637,7 @@ async def incoming(req: Request):
                                 )
                                 set_session(user, state)
                             if state.get("contact_id"):
-                                hubspot_upsert_deal(state, deal_title_from_state(state), f"Lead Islands from WhatsApp. Lang: {state.get('lang','-')}")
+                                hubspot_upsert_deal(state, deal_title_from_state(state), f"Lead Islands from WhatsApp. Lang: {state.get('lang','-')}", phone=user)
                                 print("✅ Deal upsert para Islands")
                             else:
                                 print("⚠️ No hay contact_id; se omite creación de Deal")
@@ -1621,7 +1671,7 @@ async def incoming(req: Request):
                                 )
                                 set_session(user, state)
                             if state.get("contact_id"):
-                                hubspot_upsert_deal(state, deal_title_from_state(state), f"Lead {state['service_type'].title()} from WhatsApp. Lang: {state.get('lang','-')}")
+                                hubspot_upsert_deal(state, deal_title_from_state(state), f"Lead {state['service_type'].title()} from WhatsApp. Lang: {state.get('lang','-')}", phone=user)
                                 print(f"✅ Deal upsert para {state['service_type']}")
                             else:
                                 print("⚠️ No hay contact_id; se omite creación de Deal")
@@ -1650,7 +1700,7 @@ async def incoming(req: Request):
                                 )
                                 set_session(user, state)
                             if state.get("contact_id"):
-                                hubspot_upsert_deal(state, deal_title_from_state(state), f"Lead Boats (unsure type) from WhatsApp. Lang: {state.get('lang','-')}")
+                                hubspot_upsert_deal(state, deal_title_from_state(state), f"Lead Boats (unsure type) from WhatsApp. Lang: {state.get('lang','-')}", phone=user)
                                 print("✅ Deal upsert para Boats (unsure)")
                             else:
                                 print("⚠️ No hay contact_id; se omite creación de Deal")
@@ -1774,7 +1824,7 @@ async def incoming(req: Request):
                         if state.get("contact_id"):
                             deal_title = deal_title_from_state(state)
                             deal_desc  = build_history_lines(state) or f"Lead from WhatsApp. Lang: {state.get('lang','-')}"
-                            hubspot_upsert_deal(state, deal_title, deal_desc)
+                            hubspot_upsert_deal(state, deal_title, deal_desc, phone=user)
                             print("✅ Deal upsert asignado a Ray")
                         else:
                             print("⚠️ No hay contact_id; se omite creación de Deal")
