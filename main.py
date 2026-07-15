@@ -46,40 +46,39 @@ def _rkey(user: str) -> str:
 def _boat_kind(row: dict) -> str:
     """
     Devuelve 'speedboat' | 'catamaran' | 'yacht' | ''.
-    PRIORIDAD: category_tags  > preference_tags  > nombre/desc/url.
+    PRIORIDAD: category_tags > preference_tags > nombre exacto > url.
+    NO usa description — las descripciones de marketing usan "yacht" libremente
+    y causan falsos positivos (ej: una lancha descrita como "yacht experience").
     """
     cats = (row.get("category_tags") or "").lower()
     tags = (row.get("preference_tags") or "").lower()
     name = (row.get("name") or row.get("title") or "").lower()
-    d_es = (row.get("description_es") or "").lower()
-    d_en = (row.get("description_en") or "").lower()
     url  = (row.get("url_page") or row.get("url") or "").lower()
 
     def has_tag(csv_like: str, key: str) -> bool:
         padded = f",{csv_like},"
         return f",{key}," in padded
 
-    # 1) Señal fuerte: CATEGORY_TAGS
+    # 1) Señal fuerte: CATEGORY_TAGS (la más confiable)
     if has_tag(cats, "type_speedboat"):  return "speedboat"
     if has_tag(cats, "type_catamaran"):  return "catamaran"
     if has_tag(cats, "type_yacht"):      return "yacht"
 
-    # 2) Respaldo: PREFERENCE_TAGS (por si acaso)
+    # 2) Respaldo: PREFERENCE_TAGS
     if has_tag(tags, "type_speedboat"):  return "speedboat"
     if has_tag(tags, "type_catamaran"):  return "catamaran"
     if has_tag(tags, "type_yacht"):      return "yacht"
 
-    # 3) Respaldo por texto (nombre/desc/url)
-    blob = " ".join([name, d_es, d_en])
-    tokens = re.findall(r"[a-záéíóúüñ]+", blob)  # evita falsos positivos como 'captain'
+    # 3) Solo el NOMBRE (no la descripción — evita falsos positivos)
+    name_tokens = set(re.findall(r"[a-záéíóúüñ]+", name))
+    if any(w in name_tokens for w in ("lancha","speedboat","speedboats")):   return "speedboat"
+    if any(w in name_tokens for w in ("catamaran","catamarán","catamarans")): return "catamaran"
+    if any(w in name_tokens for w in ("yate","yates")):                       return "yacht"
 
-    if any(w in tokens for w in ("lancha","speedboat","speedboats")):      return "speedboat"
-    if any(w in tokens for w in ("catamaran","catamarán","catamarans")):   return "catamaran"
-    if any(w in tokens for w in ("yacht","yachts","yate","yates")):        return "yacht"
-
-    if any(s in url for s in ("speed","lancha")):      return "speedboat"
-    if any(s in url for s in ("catamaran","/cat/")):   return "catamaran"
-    if any(s in url for s in ("yacht","yate")):        return "yacht"
+    # 4) URL (señal estructurada, relativamente confiable)
+    if any(s in url for s in ("speedboat","speed-boat","lancha")):  return "speedboat"
+    if any(s in url for s in ("catamaran","/cat/")):                return "catamaran"
+    if any(s in url for s in ("yacht","yate")):                     return "yacht"
 
     return ""
 
@@ -1047,6 +1046,11 @@ def format_results(lang, items, unit_label, service_type=None, city=None, use_em
         if loc: meta_bits.append(loc)
         if price: meta_bits.append(price + (f"/{unit_label}" if unit_label else ""))
         if capacity: meta_bits.append(("cap. " if es else "cap. ") + str(capacity))
+        # Show boat type label explicitly to avoid client confusion
+        if (service_type or "").lower() == "boats":
+            kind = _boat_kind(r)
+            kind_label = {"speedboat": "🚤 Speedboat", "catamaran": "⛵ Catamaran", "yacht": "🛥 Yacht"}.get(kind, "")
+            if kind_label: meta_bits.append(kind_label)
         meta = " — ".join(meta_bits)
 
         desc = pick_description(r, lang)
