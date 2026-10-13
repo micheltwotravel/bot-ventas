@@ -119,6 +119,9 @@ WA_PHONE_ID  = (os.getenv("WA_PHONE_NUMBER_ID") or "").strip()
 # Bot
 BOT_NAME = (os.getenv("BOT_NAME") or "Luna").strip()
 
+# HubSpot notify token (used by /hs-notify endpoint)
+HS_NOTIFY_TOKEN = (os.getenv("HS_NOTIFY_TOKEN") or "").strip()
+
 # HubSpot
 HUBSPOT_TOKEN       = (os.getenv("HUBSPOT_TOKEN") or "").strip()
 HUBSPOT_OWNER_ROSS  = (os.getenv("HUBSPOT_OWNER_ROSS")  or "").strip()
@@ -1317,6 +1320,109 @@ async def cron_followup(request: Request):
 
     return {"sent": sent, "skipped": skipped}
 
+
+# ==================== HUBSPOT NEW-CONTACTS CRON ====================
+# Polls HubSpot every N minutes for newly created contacts and
+# sends a WhatsApp notification to the assigned owner.
+# No Operations Hub required — uses the CRM Search API.
+
+HS_CRON_TOKEN = (os.getenv("HS_CRON_TOKEN") or FOLLOWUP_TOKEN).strip()
+_HS_LAST_CHECK_KEY = "two_travel:hs:last_contact_check"
+
+def _hs_last_check_ms() -> int:
+    """Return the last-checked timestamp in ms, defaulting to 10 min ago."""
+    if _redis:
+        try:
+            val = _redis.get(_HS_LAST_CHECK_KEY)
+            if val:
+                return int(val)
+        except Exception:
+            pass
+    return int((datetime.now(ZoneInfo("UTC")).timestamp() - 600) * 1000)
+
+def _hs_set_last_check_ms(ts_ms: int):
+    if _redis:
+        try:
+            _redis.set(_HS_LAST_CHECK_KEY, str(ts_ms))
+        except Exception:
+            pass
+
+@app.get("/cron/hs-contacts")
+async def cron_hs_contacts(request: Request):
+    token = request.query_params.get("token", "")
+    if token != HS_CRON_TOKEN:
+        return {"error": "unauthorized"}, 403
+
+    if not HUBSPOT_TOKEN:
+        return {"skipped": "no HUBSPOT_TOKEN"}
+
+    now_ms = int(datetime.now(ZoneInfo("UTC")).timestamp() * 1000)
+    since_ms = _hs_last_check_ms()
+
+    headers = {"Authorization": f"Bearer {HUBSPOT_TOKEN}", "Content-Type": "application/json"}
+    url = "https://api.hubapi.com/crm/v3/objects/contacts/search"
+    payload = {
+        "filterGroups": [{
+            "filters": [{
+                "propertyName": "createdate",
+                "operator": "GT",
+                "value": str(since_ms)
+            }]
+        }],
+        "properties": ["firstname", "lastname", "phone", "mobilephone", "email", "hubspot_owner_id"],
+        "sorts": [{"propertyName": "createdate", "direction": "ASCENDING"}],
+        "limit": 50
+    }
+
+    sent = 0
+    try:
+        r = requests.post(url, headers=headers, json=payload, timeout=20)
+        if not r.ok:
+            print("hs-contacts cron search error:", r.status_code, r.text[:200])
+            return {"error": r.status_code}
+
+        contacts = r.json().get("results", [])
+        print(f"hs-contacts cron: {len(contacts)} new since {since_ms}")
+
+        for c in contacts:
+            props = c.get("properties", {})
+            firstname = (props.get("firstname") or "").strip()
+            lastname  = (props.get("lastname") or "").strip()
+            name = f"{firstname} {lastname}".strip() or "—"
+            phone = (props.get("phone") or props.get("mobilephone") or "").strip()
+            email = (props.get("email") or "").strip()
+            owner_id = str(props.get("hubspot_owner_id") or "").strip()
+
+            owner_name, owner_wa = _owner_wa_from_hs_id(owner_id)
+            if not owner_wa:
+                print(f"hs-contacts: no WA for owner {owner_id!r}, skip")
+                continue
+
+            phone_digits = re.sub(r"[^\d]", "", phone)
+            wa_link = f"https://wa.me/{phone_digits}" if phone_digits else ""
+
+            lines = ["🔔 *Nuevo contacto en HubSpot*"]
+            if name and name != "—":
+                lines.append(f"👤 {name}")
+            if phone:
+                lines.append(f"📱 {phone}")
+            if email:
+                lines.append(f"✉️ {email}")
+            if wa_link:
+                lines.append(f"💬 {wa_link}")
+
+            wa_send_text(owner_wa, "\n".join(lines))
+            print(f"hs-contacts: notified {owner_name} about {name}")
+            sent += 1
+
+    except Exception as e:
+        print("hs-contacts cron error:", e)
+        return {"error": str(e)}
+
+    _hs_set_last_check_ms(now_ms)
+    return {"sent": sent, "since_ms": since_ms, "now_ms": now_ms}
+
+
 # ==================== WEBHOOK VERIFICATION (GET) ====================
 @app.get("/wa-webhook")
 async def verify_webhook(request: Request):
@@ -1938,3 +2044,70 @@ async def incoming(req: Request):
                     continue
 
     return {"ok": True}
+
+
+# ==================== HUBSPOT → WHATSAPP NOTIFY ====================
+# Called by a HubSpot Workflow via "Send a webhook" action.
+# Payload (from workflow properties or custom body):
+#   name, phone, email, owner_id  (all optional but name+phone are most useful)
+# Auth: header  X-Two-Token: <HS_NOTIFY_TOKEN env var>
+
+def _owner_wa_from_hs_id(owner_id: str) -> tuple[str, str]:
+    """Returns (owner_name, owner_wa_number) for a HubSpot owner ID."""
+    if owner_id and HUBSPOT_OWNER_RAY and owner_id == HUBSPOT_OWNER_RAY:
+        return (OWNER_RAY_NAME, OWNER_RAY_WA)
+    if owner_id and HUBSPOT_OWNER_ROSS and owner_id == HUBSPOT_OWNER_ROSS:
+        return (OWNER_ROSS_NAME, OWNER_ROSS_WA)
+    # Default → Ray
+    return (OWNER_RAY_NAME, OWNER_RAY_WA)
+
+@app.post("/hs-notify")
+async def hs_notify(request: Request):
+    # Token auth
+    if HS_NOTIFY_TOKEN:
+        token = request.headers.get("X-Two-Token", "")
+        if token != HS_NOTIFY_TOKEN:
+            return {"error": "unauthorized"}, 401
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    # HubSpot workflows can send arrays or single objects — normalise
+    if isinstance(body, list):
+        body = body[0] if body else {}
+
+    name     = (body.get("name") or body.get("firstname") or "").strip()
+    lastname = (body.get("lastname") or "").strip()
+    if name and lastname:
+        name = f"{name} {lastname}"
+    phone    = (body.get("phone") or body.get("mobilephone") or "").strip()
+    email    = (body.get("email") or "").strip()
+    owner_id = str(body.get("hubspot_owner_id") or body.get("owner_id") or "").strip()
+
+    owner_name, owner_wa = _owner_wa_from_hs_id(owner_id)
+
+    if not owner_wa:
+        print(f"hs-notify: no WA number for owner {owner_id!r} — skipping send")
+        return {"ok": False, "reason": "no owner wa configured"}
+
+    # Build wa.me quick-link (strips non-digits)
+    phone_digits = re.sub(r"[^\d]", "", phone)
+    wa_link = f"https://wa.me/{phone_digits}" if phone_digits else ""
+
+    # Message lines
+    lines = ["🔔 *Nuevo lead en HubSpot*"]
+    if name:
+        lines.append(f"👤 {name}")
+    if phone:
+        lines.append(f"📱 {phone}")
+    if email:
+        lines.append(f"✉️ {email}")
+    if wa_link:
+        lines.append(f"💬 {wa_link}")
+
+    msg = "\n".join(lines)
+    result = wa_send_text(owner_wa, msg)
+    print(f"hs-notify → {owner_name} ({owner_wa}): {result}")
+    return {"ok": True, "sent_to": owner_name}
