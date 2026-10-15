@@ -1399,7 +1399,7 @@ async def cron_hs_contacts(request: Request):
                 continue
 
             phone_digits = re.sub(r"[^\d]", "", phone)
-            wa_link = f"https://wa.me/{phone_digits}" if phone_digits else ""
+            wa_link = _prefilled_wa_link(phone_digits, owner_name.split()[0], name)
 
             lines = ["🔔 *Nuevo contacto en HubSpot*"]
             if name and name != "—":
@@ -1409,7 +1409,7 @@ async def cron_hs_contacts(request: Request):
             if email:
                 lines.append(f"✉️ {email}")
             if wa_link:
-                lines.append(f"💬 {wa_link}")
+                lines.append(f"💬 Tap to message: {wa_link}")
 
             wa_send_text(owner_wa, "\n".join(lines))
             print(f"hs-contacts: notified {owner_name} about {name}")
@@ -2061,6 +2061,16 @@ def _owner_wa_from_hs_id(owner_id: str) -> tuple[str, str]:
     # Default → Ray
     return (OWNER_RAY_NAME, OWNER_RAY_WA)
 
+def _prefilled_wa_link(phone_digits: str, owner_first: str, lead_name: str) -> str:
+    """wa.me link that opens with a message already typed for the owner to send."""
+    if not phone_digits:
+        return ""
+    first = (lead_name.split()[0] if lead_name and lead_name != "—" else "")
+    greeting = f"Hi {first}! " if first else "Hi! "
+    text = (f"{greeting}This is {owner_first} from Two Travel 🌴 "
+            "I saw your inquiry — happy to help! What are you looking for?")
+    return f"https://wa.me/{phone_digits}?text={urllib.parse.quote(text)}"
+
 @app.post("/hs-notify")
 async def hs_notify(request: Request):
     # Token auth
@@ -2092,9 +2102,9 @@ async def hs_notify(request: Request):
         print(f"hs-notify: no WA number for owner {owner_id!r} — skipping send")
         return {"ok": False, "reason": "no owner wa configured"}
 
-    # Build wa.me quick-link (strips non-digits)
+    # Build wa.me quick-link (strips non-digits, pre-fills opening message)
     phone_digits = re.sub(r"[^\d]", "", phone)
-    wa_link = f"https://wa.me/{phone_digits}" if phone_digits else ""
+    wa_link = _prefilled_wa_link(phone_digits, owner_name.split()[0], name)
 
     # Message lines
     lines = ["🔔 *Nuevo lead en HubSpot*"]
@@ -2105,7 +2115,7 @@ async def hs_notify(request: Request):
     if email:
         lines.append(f"✉️ {email}")
     if wa_link:
-        lines.append(f"💬 {wa_link}")
+        lines.append(f"💬 Tap to message: {wa_link}")
 
     msg = "\n".join(lines)
     result = wa_send_text(owner_wa, msg)
