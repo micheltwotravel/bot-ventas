@@ -135,7 +135,7 @@ CAL_ROSS = (os.getenv("CAL_ROSS") or "").strip()
 
 # Owners
 OWNER_RAY_NAME  = "Ray Kanevsky"
-OWNER_RAY_WA    = (os.getenv("OWNER_GLOBAL_WA") or "+1 212 653 0000").strip()
+OWNER_RAY_WA    = (os.getenv("OWNER_RAY_WA") or os.getenv("OWNER_GLOBAL_WA") or "").strip()
 OWNER_ROSS_NAME = "Ross"
 OWNER_ROSS_WA   = (os.getenv("OWNER_ROSS_WA") or "").strip()
 
