@@ -1266,16 +1266,19 @@ def _do_poll_hs_contacts() -> dict:
 
             phone_digits = re.sub(r"[^\d]", "", phone)
             wa_link = _prefilled_wa_link(phone_digits, owner_name.split()[0], name)
+            sms_link = f"sms:+{phone_digits}" if phone_digits else ""
 
-            lines = ["🔔 *Nuevo contacto en HubSpot*"]
+            lines = ["🔔 *New HubSpot Lead*"]
             if name and name != "—":
                 lines.append(f"👤 {name}")
             if phone:
-                lines.append(f"📱 {phone}")
+                lines.append(f"📲 iMessage/SMS: {phone}")
             if email:
                 lines.append(f"✉️ {email}")
+            if sms_link:
+                lines.append(f"💬 SMS: {sms_link}")
             if wa_link:
-                lines.append(f"💬 Tap to message: {wa_link}")
+                lines.append(f"🟢 WhatsApp: {wa_link}")
 
             wa_send_text(owner_wa, "\n".join(lines))
             print(f"hs-poll: notified {owner_name} about {name}")
@@ -2119,20 +2122,21 @@ async def hs_notify(request: Request):
         print(f"hs-notify: no WA number for owner {owner_id!r} — skipping send")
         return {"ok": False, "reason": "no owner wa configured"}
 
-    # Build wa.me quick-link (strips non-digits, pre-fills opening message)
     phone_digits = re.sub(r"[^\d]", "", phone)
     wa_link = _prefilled_wa_link(phone_digits, owner_name.split()[0], name)
+    sms_link = f"sms:+{phone_digits}" if phone_digits else ""
 
-    # Message lines
-    lines = ["🔔 *Nuevo lead en HubSpot*"]
+    lines = ["🔔 *New HubSpot Lead*"]
     if name:
         lines.append(f"👤 {name}")
     if phone:
-        lines.append(f"📱 {phone}")
+        lines.append(f"📲 iMessage/SMS: {phone}")
     if email:
         lines.append(f"✉️ {email}")
+    if sms_link:
+        lines.append(f"💬 SMS: {sms_link}")
     if wa_link:
-        lines.append(f"💬 Tap to message: {wa_link}")
+        lines.append(f"🟢 WhatsApp: {wa_link}")
 
     msg = "\n".join(lines)
     result = wa_send_text(owner_wa, msg)
