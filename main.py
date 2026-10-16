@@ -1,5 +1,5 @@
 # ==================== IMPORTS ====================
-import os, re, csv, io, requests, smtplib
+import os, re, csv, io, requests, smtplib, asyncio
 import urllib.parse
 import unicodedata
 from email.mime.text import MIMEText
@@ -1223,11 +1223,91 @@ def pax_from_reply(rid: str) -> int:
     return 0
 
 # ==================== STARTUP / HEALTH ====================
+def _do_poll_hs_contacts() -> dict:
+    """Poll HubSpot for new contacts and send WhatsApp alerts. Runs sync."""
+    if not HUBSPOT_TOKEN:
+        return {"skipped": "no HUBSPOT_TOKEN"}
+
+    now_ms = int(datetime.now(ZoneInfo("UTC")).timestamp() * 1000)
+    since_ms = _hs_last_check_ms()
+
+    headers = {"Authorization": f"Bearer {HUBSPOT_TOKEN}", "Content-Type": "application/json"}
+    url = "https://api.hubapi.com/crm/v3/objects/contacts/search"
+    payload = {
+        "filterGroups": [{"filters": [{"propertyName": "createdate", "operator": "GT", "value": str(since_ms)}]}],
+        "properties": ["firstname", "lastname", "phone", "mobilephone", "email", "hubspot_owner_id"],
+        "sorts": [{"propertyName": "createdate", "direction": "ASCENDING"}],
+        "limit": 50,
+    }
+
+    sent = 0
+    try:
+        r = requests.post(url, headers=headers, json=payload, timeout=20)
+        if not r.ok:
+            print("hs-poll search error:", r.status_code, r.text[:200])
+            return {"error": r.status_code}
+
+        contacts = r.json().get("results", [])
+        print(f"hs-poll: {len(contacts)} new contacts since {since_ms}")
+
+        for c in contacts:
+            props = c.get("properties", {})
+            firstname = (props.get("firstname") or "").strip()
+            lastname  = (props.get("lastname") or "").strip()
+            name = f"{firstname} {lastname}".strip() or "—"
+            phone = (props.get("phone") or props.get("mobilephone") or "").strip()
+            email = (props.get("email") or "").strip()
+            owner_id = str(props.get("hubspot_owner_id") or "").strip()
+
+            owner_name, owner_wa = _owner_wa_from_hs_id(owner_id)
+            if not owner_wa:
+                print(f"hs-poll: no WA for owner {owner_id!r}, skip")
+                continue
+
+            phone_digits = re.sub(r"[^\d]", "", phone)
+            wa_link = _prefilled_wa_link(phone_digits, owner_name.split()[0], name)
+
+            lines = ["🔔 *Nuevo contacto en HubSpot*"]
+            if name and name != "—":
+                lines.append(f"👤 {name}")
+            if phone:
+                lines.append(f"📱 {phone}")
+            if email:
+                lines.append(f"✉️ {email}")
+            if wa_link:
+                lines.append(f"💬 Tap to message: {wa_link}")
+
+            wa_send_text(owner_wa, "\n".join(lines))
+            print(f"hs-poll: notified {owner_name} about {name}")
+            sent += 1
+
+    except Exception as e:
+        print("hs-poll error:", e)
+        return {"error": str(e)}
+
+    _hs_set_last_check_ms(now_ms)
+    return {"sent": sent, "since_ms": since_ms, "now_ms": now_ms}
+
+
+async def _hs_contacts_loop():
+    """Background loop: poll HubSpot every 5 minutes."""
+    await asyncio.sleep(60)  # wait 1 min after startup before first poll
+    while True:
+        try:
+            result = await asyncio.to_thread(_do_poll_hs_contacts)
+            print("hs-loop:", result)
+        except Exception as e:
+            print("hs-loop error:", e)
+        await asyncio.sleep(300)  # 5 minutes
+
+
 @app.on_event("startup")
 async def show_routes():
     print("BOOT> Routes:", [r.path for r in app.router.routes])
     print("BOOT> WA_PHONE_ID:", repr(WA_PHONE_ID))
     print("BOOT> WA_TOKEN len:", len(WA_TOKEN or ""))
+    asyncio.create_task(_hs_contacts_loop())
+    print("BOOT> HubSpot contact poller started (every 5 min)")
 
 @app.get("/")
 def root():
@@ -1328,6 +1408,7 @@ async def cron_followup(request: Request):
 
 HS_CRON_TOKEN = (os.getenv("HS_CRON_TOKEN") or FOLLOWUP_TOKEN).strip()
 _HS_LAST_CHECK_KEY = "two_travel:hs:last_contact_check"
+_hs_last_check_mem: int = 0  # in-memory fallback when no Redis
 
 def _hs_last_check_ms() -> int:
     """Return the last-checked timestamp in ms, defaulting to 10 min ago."""
@@ -1338,9 +1419,13 @@ def _hs_last_check_ms() -> int:
                 return int(val)
         except Exception:
             pass
+    if _hs_last_check_mem:
+        return _hs_last_check_mem
     return int((datetime.now(ZoneInfo("UTC")).timestamp() - 600) * 1000)
 
 def _hs_set_last_check_ms(ts_ms: int):
+    global _hs_last_check_mem
+    _hs_last_check_mem = ts_ms
     if _redis:
         try:
             _redis.set(_HS_LAST_CHECK_KEY, str(ts_ms))
@@ -1352,75 +1437,7 @@ async def cron_hs_contacts(request: Request):
     token = request.query_params.get("token", "")
     if token != HS_CRON_TOKEN:
         return {"error": "unauthorized"}, 403
-
-    if not HUBSPOT_TOKEN:
-        return {"skipped": "no HUBSPOT_TOKEN"}
-
-    now_ms = int(datetime.now(ZoneInfo("UTC")).timestamp() * 1000)
-    since_ms = _hs_last_check_ms()
-
-    headers = {"Authorization": f"Bearer {HUBSPOT_TOKEN}", "Content-Type": "application/json"}
-    url = "https://api.hubapi.com/crm/v3/objects/contacts/search"
-    payload = {
-        "filterGroups": [{
-            "filters": [{
-                "propertyName": "createdate",
-                "operator": "GT",
-                "value": str(since_ms)
-            }]
-        }],
-        "properties": ["firstname", "lastname", "phone", "mobilephone", "email", "hubspot_owner_id"],
-        "sorts": [{"propertyName": "createdate", "direction": "ASCENDING"}],
-        "limit": 50
-    }
-
-    sent = 0
-    try:
-        r = requests.post(url, headers=headers, json=payload, timeout=20)
-        if not r.ok:
-            print("hs-contacts cron search error:", r.status_code, r.text[:200])
-            return {"error": r.status_code}
-
-        contacts = r.json().get("results", [])
-        print(f"hs-contacts cron: {len(contacts)} new since {since_ms}")
-
-        for c in contacts:
-            props = c.get("properties", {})
-            firstname = (props.get("firstname") or "").strip()
-            lastname  = (props.get("lastname") or "").strip()
-            name = f"{firstname} {lastname}".strip() or "—"
-            phone = (props.get("phone") or props.get("mobilephone") or "").strip()
-            email = (props.get("email") or "").strip()
-            owner_id = str(props.get("hubspot_owner_id") or "").strip()
-
-            owner_name, owner_wa = _owner_wa_from_hs_id(owner_id)
-            if not owner_wa:
-                print(f"hs-contacts: no WA for owner {owner_id!r}, skip")
-                continue
-
-            phone_digits = re.sub(r"[^\d]", "", phone)
-            wa_link = _prefilled_wa_link(phone_digits, owner_name.split()[0], name)
-
-            lines = ["🔔 *Nuevo contacto en HubSpot*"]
-            if name and name != "—":
-                lines.append(f"👤 {name}")
-            if phone:
-                lines.append(f"📱 {phone}")
-            if email:
-                lines.append(f"✉️ {email}")
-            if wa_link:
-                lines.append(f"💬 Tap to message: {wa_link}")
-
-            wa_send_text(owner_wa, "\n".join(lines))
-            print(f"hs-contacts: notified {owner_name} about {name}")
-            sent += 1
-
-    except Exception as e:
-        print("hs-contacts cron error:", e)
-        return {"error": str(e)}
-
-    _hs_set_last_check_ms(now_ms)
-    return {"sent": sent, "since_ms": since_ms, "now_ms": now_ms}
+    return await asyncio.to_thread(_do_poll_hs_contacts)
 
 
 # ==================== WEBHOOK VERIFICATION (GET) ====================
