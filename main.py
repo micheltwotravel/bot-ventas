@@ -2185,9 +2185,13 @@ async def hs_notify(request: Request):
 
     owner_name, owner_wa = _owner_wa_from_hs_id(owner_id)
 
+    # Always create the reservation regardless of WA config
+    deal_id = str(body.get("deal_id") or body.get("hs_object_id") or "")
+    _sb_create_reservation(name or email, owner_name, deal_id)
+
     if not owner_wa:
-        print(f"hs-notify: no WA number for owner {owner_id!r} — skipping send")
-        return {"ok": False, "reason": "no owner wa configured"}
+        print(f"hs-notify: no WA number for owner {owner_id!r} — skipping WA send")
+        return {"ok": True, "reservation": "created", "wa": "skipped"}
 
     phone_digits = re.sub(r"[^\d]", "", phone)
     wa_link = _prefilled_wa_link(phone_digits, owner_name.split()[0], name)
@@ -2208,9 +2212,5 @@ async def hs_notify(request: Request):
     msg = "\n".join(lines)
     result = wa_send_text(owner_wa, msg)
     print(f"hs-notify → {owner_name} ({owner_wa}): {result}")
-
-    # Also create a Lead reservation in the platform
-    deal_id = str(body.get("deal_id") or body.get("hs_object_id") or "")
-    _sb_create_reservation(name or email, owner_name, deal_id)
 
     return {"ok": True, "sent_to": owner_name}
