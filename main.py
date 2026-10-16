@@ -122,6 +122,10 @@ BOT_NAME = (os.getenv("BOT_NAME") or "Luna").strip()
 # HubSpot notify token (used by /hs-notify endpoint)
 HS_NOTIFY_TOKEN = (os.getenv("HS_NOTIFY_TOKEN") or "").strip()
 
+# Supabase (for writing reservations from hs-notify)
+SB_URL          = (os.getenv("SUPABASE_URL")         or "https://zcgisoigfzytpanoaomq.supabase.co").strip()
+SB_SERVICE_KEY  = (os.getenv("SUPABASE_SERVICE_KEY") or "").strip()
+
 # HubSpot
 HUBSPOT_TOKEN       = (os.getenv("HUBSPOT_TOKEN") or "").strip()
 HUBSPOT_OWNER_ROSS  = (os.getenv("HUBSPOT_OWNER_ROSS")  or "").strip()
@@ -2091,6 +2095,69 @@ def _prefilled_wa_link(phone_digits: str, owner_first: str, lead_name: str) -> s
             "I saw your inquiry — happy to help! What are you looking for?")
     return f"https://wa.me/{phone_digits}?text={urllib.parse.quote(text)}"
 
+def _sb_create_reservation(name: str, owner_name: str, deal_id: str = ""):
+    """Adds a Lead row to finance_reservations_v1 in Supabase when a HubSpot deal arrives."""
+    if not SB_SERVICE_KEY:
+        print("hs-notify: no SB_SERVICE_KEY — skipping Supabase write")
+        return
+    try:
+        headers = {
+            "apikey": SB_SERVICE_KEY,
+            "Authorization": f"Bearer {SB_SERVICE_KEY}",
+            "Content-Type": "application/json",
+        }
+        # Read current data blob
+        r = requests.get(
+            f"{SB_URL}/rest/v1/kickoffs?select=data&id=eq.finance_reservations_v1",
+            headers=headers, timeout=10,
+        )
+        rows = r.json() if r.ok else []
+        existing = rows[0] if rows else {}
+        d = existing.get("data") or {}
+        notes_raw = d.get("internalNotes", "{}")
+        notes = notes_raw if isinstance(notes_raw, dict) else __import__("json").loads(notes_raw or "{}")
+        reservations = notes.get("reservations") or []
+
+        # Prevent duplicate deal
+        if deal_id and any(rv.get("_dealId") == deal_id for rv in reservations):
+            print(f"hs-notify: deal {deal_id} already in reservations — skipping")
+            return
+
+        import datetime
+        new_row = {
+            "_dealId":    deal_id,
+            "name":       name,
+            "salesRep":   owner_name,
+            "dealSource": "HubSpot",
+            "type":       "",
+            "checkIn":    "",
+            "checkOut":   "",
+            "property":   "",
+            "city":       "",
+            "qty":        "",
+            "rate":       "",
+            "tax":        "",
+            "total":      "",
+            "commission": "",
+            "ourPrice":   "",
+            "status":     "Lead",
+            "confirmedAt": datetime.date.today().isoformat(),
+        }
+        merged_notes = __import__("json").dumps({**notes, "reservations": [new_row] + reservations})
+        merged_data  = {**d, "internalNotes": merged_notes}
+
+        # Upsert the finance_reservations_v1 row
+        requests.patch(
+            f"{SB_URL}/rest/v1/kickoffs?id=eq.finance_reservations_v1",
+            headers={**headers, "Prefer": "return=minimal"},
+            json={"data": merged_data},
+            timeout=10,
+        )
+        print(f"✅ Supabase reservation created for {name} (deal {deal_id})")
+    except Exception as e:
+        print(f"❌ _sb_create_reservation error: {e}")
+
+
 @app.post("/hs-notify")
 async def hs_notify(request: Request):
     # Token auth
@@ -2141,4 +2208,9 @@ async def hs_notify(request: Request):
     msg = "\n".join(lines)
     result = wa_send_text(owner_wa, msg)
     print(f"hs-notify → {owner_name} ({owner_wa}): {result}")
+
+    # Also create a Lead reservation in the platform
+    deal_id = str(body.get("deal_id") or body.get("hs_object_id") or "")
+    _sb_create_reservation(name or email, owner_name, deal_id)
+
     return {"ok": True, "sent_to": owner_name}
