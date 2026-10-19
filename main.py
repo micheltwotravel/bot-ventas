@@ -2158,6 +2158,37 @@ def _sb_create_reservation(name: str, owner_name: str, deal_id: str = ""):
         print(f"❌ _sb_create_reservation error: {e}")
 
 
+@app.get("/test-wa")
+async def test_wa(request: Request):
+    """Send a test WA message to Ray to verify the number is configured."""
+    token = request.query_params.get("token", "")
+    if token != (HS_NOTIFY_TOKEN or FOLLOWUP_TOKEN):
+        return {"error": "unauthorized"}
+    if not OWNER_RAY_WA:
+        return {"error": "OWNER_RAY_WA not set", "hint": "Set OWNER_GLOBAL_WA or OWNER_RAY_WA in Render env vars"}
+    msg = "✅ *Two Travel Bot* — test de conexión. Si ves esto, las notificaciones de HubSpot están configuradas correctamente."
+    result = wa_send_text(OWNER_RAY_WA, msg)
+    return {"ok": result.status_code == 200, "to": OWNER_RAY_WA[:6] + "****", "status": result.status_code}
+
+
+@app.get("/debug-env")
+async def debug_env(request: Request):
+    """Check which env vars are set (no values, just presence)."""
+    token = request.query_params.get("token", "")
+    if token != (HS_NOTIFY_TOKEN or FOLLOWUP_TOKEN):
+        return {"error": "unauthorized"}
+    return {
+        "OWNER_RAY_WA":        bool(OWNER_RAY_WA),
+        "OWNER_ROSS_WA":       bool(OWNER_ROSS_WA),
+        "HUBSPOT_TOKEN":       bool(HUBSPOT_TOKEN),
+        "HUBSPOT_OWNER_RAY":   bool(HUBSPOT_OWNER_RAY),
+        "HUBSPOT_OWNER_ROSS":  bool(HUBSPOT_OWNER_ROSS),
+        "SB_SERVICE_KEY":      bool(SB_SERVICE_KEY),
+        "WA_TOKEN":            bool(WA_TOKEN),
+        "WA_PHONE_ID":         bool(WA_PHONE_ID),
+    }
+
+
 @app.post("/hs-notify")
 async def hs_notify(request: Request):
     # Token auth
