@@ -2202,6 +2202,11 @@ async def hs_notify(request: Request):
     except Exception:
         body = {}
 
+    # Wait for HubSpot to finish processing the form submission with the hutk
+    # cookie before Luna creates the deal — otherwise source attribution stays
+    # "Offline" instead of the real channel (Paid Search, Organic, etc.)
+    await asyncio.sleep(5)
+
     # HubSpot workflows can send arrays or single objects — normalise
     if isinstance(body, list):
         body = body[0] if body else {}
