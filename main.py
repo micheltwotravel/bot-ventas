@@ -111,13 +111,309 @@ def del_session(user: str):
     SESSIONS.pop(user, None)
 
 
+# ==================== GROUP STATE (Redis) ====================
+def _gkey(gid: str, suffix: str) -> str:
+    return f"two_travel:grp:{re.sub(r'[^a-zA-Z0-9@._-]','_',gid)}:{suffix}"
+
+def group_get_settings(gid: str) -> dict:
+    if _redis:
+        try:
+            raw = _redis.get(_gkey(gid, "cfg"))
+            if raw:
+                return json.loads(raw)
+        except Exception:
+            pass
+    return {"monitor": True, "autorespond": False, "alertHours": GROUP_ALERT_HOURS,
+            "kickoffId": "", "conciergeWa": "", "clientName": ""}
+
+def group_save_settings(gid: str, cfg: dict):
+    if _redis:
+        try:
+            _redis.set(_gkey(gid, "cfg"), json.dumps(cfg))
+        except Exception as e:
+            print("group_save_settings error:", e)
+
+def group_add_message(gid: str, sender: str, text: str, ts: float, is_bot: bool = False):
+    if _redis:
+        try:
+            msg = json.dumps({"sender": sender, "text": text, "ts": ts, "bot": is_bot})
+            _redis.lpush(_gkey(gid, "hist"), msg)
+            _redis.ltrim(_gkey(gid, "hist"), 0, 199)
+        except Exception:
+            pass
+
+def group_get_history(gid: str, limit: int = 30) -> list:
+    if _redis:
+        try:
+            items = _redis.lrange(_gkey(gid, "hist"), 0, limit - 1)
+            return [json.loads(i) for i in items]
+        except Exception:
+            pass
+    return []
+
+def group_add_pending(gid: str, sender: str, text: str, ts: float):
+    if _redis:
+        try:
+            item = json.dumps({"sender": sender, "text": text, "ts": ts})
+            _redis.lpush(_gkey(gid, "pending"), item)
+            _redis.ltrim(_gkey(gid, "pending"), 0, 49)
+        except Exception:
+            pass
+
+def group_get_pending(gid: str) -> list:
+    if _redis:
+        try:
+            items = _redis.lrange(_gkey(gid, "pending"), 0, 49)
+            return [json.loads(i) for i in items]
+        except Exception:
+            pass
+    return []
+
+def group_clear_pending(gid: str):
+    if _redis:
+        try:
+            _redis.delete(_gkey(gid, "pending"))
+        except Exception:
+            pass
+
+def group_list_all_ids() -> list:
+    """Return all known group IDs (from Redis cfg keys)."""
+    if not _redis:
+        return []
+    try:
+        keys = list(_redis.scan_iter("two_travel:grp:*:cfg"))
+        return [k.split(":")[2] for k in keys]
+    except Exception:
+        return []
+
+
+# ==================== SUPABASE KICKOFF HELPERS ====================
+def sb_get_kickoff(kickoff_id: str) -> dict:
+    if not SB_URL or not SB_SERVICE_KEY:
+        return {}
+    try:
+        url = f"{SB_URL}/rest/v1/kickoffs?id=eq.{urllib.parse.quote(kickoff_id)}&select=id,data"
+        headers = {"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
+        r = requests.get(url, headers=headers, timeout=8)
+        rows = r.json()
+        if isinstance(rows, list) and rows:
+            return rows[0].get("data", {})
+    except Exception as e:
+        print(f"sb_get_kickoff error: {e}")
+    return {}
+
+def sb_search_kickoffs(name_query: str) -> list:
+    """Search kickoffs by guest name (ilike on JSONB field)."""
+    if not SB_URL or not SB_SERVICE_KEY or not name_query.strip():
+        return []
+    try:
+        encoded = urllib.parse.quote(f"%{name_query.strip()}%")
+        url = f"{SB_URL}/rest/v1/kickoffs?select=id,data&data->>guestName=ilike.{encoded}&limit=5"
+        headers = {"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
+        r = requests.get(url, headers=headers, timeout=8)
+        rows = r.json()
+        if isinstance(rows, list):
+            return [{"id": row["id"], "data": row.get("data", {})} for row in rows]
+    except Exception as e:
+        print(f"sb_search_kickoffs error: {e}")
+    return []
+
+def build_kickoff_summary(kickoff_id: str) -> str:
+    d = sb_get_kickoff(kickoff_id)
+    if not d:
+        return "No se encontró información del kickoff."
+    lines = []
+    if d.get("guestName"):
+        lines.append(f"Cliente: {d['guestName']}")
+    if d.get("city"):
+        lines.append(f"Ciudad: {d['city']}")
+    if d.get("checkIn"):
+        lines.append(f"Llegada: {d['checkIn']}")
+    if d.get("checkOut"):
+        lines.append(f"Salida: {d['checkOut']}")
+    if d.get("pax"):
+        lines.append(f"Pax: {d['pax']}")
+    if d.get("assignedConciergeName"):
+        lines.append(f"Concierge: {d['assignedConciergeName']}")
+    cart = d.get("cart") or []
+    if isinstance(cart, str):
+        try:
+            cart = json.loads(cart)
+        except Exception:
+            cart = []
+    titles = [item.get("title") or item.get("name") or "" for item in cart if isinstance(item, dict)]
+    titles = [t for t in titles if t]
+    if titles:
+        lines.append(f"Servicios: {', '.join(titles[:5])}")
+    notes = d.get("internalNotes") or ""
+    if notes and len(notes) < 300:
+        lines.append(f"Notas: {notes[:200]}")
+    return "\n".join(lines) if lines else "Sin detalles disponibles."
+
+
+# ==================== CONCIERGE MODE ====================
+def is_concierge(user: str) -> bool:
+    digits = wa_click_number(user)
+    return digits in CONCIERGE_WA_NUMBERS or user in CONCIERGE_WA_NUMBERS
+
+def handle_concierge_dm(user: str, text: str):
+    """Handle a DM from a concierge."""
+    low = text.lower().strip()
+
+    # pendientes — list unresolved questions across all groups
+    if any(w in low for w in ["pendiente", "sin responder", "qué hay", "que hay"]):
+        gids = group_list_all_ids()
+        lines = []
+        now_ts = datetime.now().timestamp()
+        for gid in gids:
+            cfg = group_get_settings(gid)
+            if cfg.get("conciergeWa") and wa_click_number(cfg["conciergeWa"]) != wa_click_number(user):
+                continue
+            pending = group_get_pending(gid)
+            if pending:
+                name = cfg.get("clientName") or cfg.get("kickoffId") or gid[:20]
+                lines.append(f"\n*{name}* — {len(pending)} pendiente(s):")
+                for p in pending[:2]:
+                    age_h = (now_ts - float(p.get("ts", now_ts))) / 3600
+                    lines.append(f"  · ({age_h:.1f}h) {p['text'][:80]}")
+        if lines:
+            wa_send_text(user, "📋 *Pendientes en tus grupos:*" + "".join(lines))
+        else:
+            wa_send_text(user, "✅ No hay pendientes sin responder.")
+        return
+
+    # resumen / cliente <nombre o kickoff_id>
+    for prefix in ["resumen ", "cliente ", "qué pidió ", "que pidio ", "busca "]:
+        if low.startswith(prefix):
+            query = text[len(prefix):].strip()
+            # Try as kickoff ID first, then search by name
+            d = sb_get_kickoff(query)
+            if d:
+                wa_send_text(user, f"📋 *Resumen kickoff {query}:*\n{build_kickoff_summary(query)}")
+            else:
+                results = sb_search_kickoffs(query)
+                if not results:
+                    wa_send_text(user, f"No encontré ningún cliente con '{query}'.")
+                elif len(results) == 1:
+                    r = results[0]
+                    d = r["data"]
+                    name = d.get("guestName") or d.get("tripName") or r["id"]
+                    wa_send_text(user, f"📋 *{name}:*\n{build_kickoff_summary(r['id'])}")
+                else:
+                    lines = [f"Encontré {len(results)} resultados:"]
+                    for r in results:
+                        d = r["data"]
+                        name = d.get("guestName") or d.get("tripName") or r["id"]
+                        city = d.get("city") or ""
+                        checkin = d.get("checkIn") or ""
+                        lines.append(f"• *{name}* {city} {checkin}\n  ID: `{r['id']}`")
+                    lines.append("\nEscribe `resumen <ID>` para el resumen completo.")
+                    wa_send_text(user, "\n".join(lines))
+            return
+
+    # activar/desactivar respuesta en grupo
+    for action_w, flag in [("activar respuesta", True), ("desactivar respuesta", False),
+                            ("activar auto", True), ("desactivar auto", False)]:
+        if action_w in low:
+            # Find group by name or use last active
+            # For now, find groups linked to this concierge
+            gids = group_list_all_ids()
+            updated = []
+            for gid in gids:
+                cfg = group_get_settings(gid)
+                if cfg.get("conciergeWa") and wa_click_number(cfg["conciergeWa"]) == wa_click_number(user):
+                    cfg["autorespond"] = flag
+                    group_save_settings(gid, cfg)
+                    updated.append(cfg.get("clientName") or gid[:20])
+            if updated:
+                estado = "activada ✅" if flag else "desactivada ⏸️"
+                wa_send_text(user, f"Respuesta automática {estado} en: {', '.join(updated)}")
+            else:
+                wa_send_text(user, "No encontré grupos vinculados a tu número. Configúralos desde el panel.")
+            return
+
+    # Default help
+    wa_send_text(user, (
+        "🤖 *Asistente Two Travel*\n\n"
+        "Comandos:\n"
+        "• *pendientes* — ver preguntas sin responder\n"
+        "• *cliente [nombre]* — buscar un cliente\n"
+        "• *resumen [kickoff_id]* — resumen del viaje\n"
+        "• *activar respuesta* — bot responde en tus grupos\n"
+        "• *desactivar respuesta* — solo monitoreo\n\n"
+        "Para vincular grupos, ve al panel de concierge."
+    ))
+
+
+# ==================== GROUP MESSAGE HANDLER ====================
+def bot_reply_for_group(group_id: str, user_message: str, sender_name: str = "") -> str:
+    cfg = group_get_settings(group_id)
+    kickoff_id = cfg.get("kickoffId", "")
+    client_name = cfg.get("clientName", "")
+
+    context_lines = []
+    if client_name:
+        context_lines.append(f"Nombre del grupo/cliente: {client_name}")
+    if kickoff_id:
+        context_lines.append(build_kickoff_summary(kickoff_id))
+
+    history = group_get_history(group_id, 10)
+    history_text = ""
+    if history:
+        history_text = "\n\nMensajes recientes del grupo:\n"
+        for msg in reversed(history):
+            role = "Bot" if msg.get("bot") else msg.get("sender", "?")
+            history_text += f"- {role}: {msg.get('text', '')[:120]}\n"
+
+    system = (
+        "Eres el asistente de Two Travel para grupos de clientes VIP. "
+        "Ayudas al equipo concierge y respondes preguntas de los viajeros sobre su experiencia. "
+        "Sé amable, conciso y profesional. Usa el idioma del mensaje recibido. "
+        "Si no sabes un dato específico (hora exacta, dirección, precio), di que el concierge confirmará. "
+        "No inventes información. Responde máximo en 3 oraciones."
+    )
+    if context_lines:
+        system += f"\n\nContexto del viaje:\n" + "\n".join(context_lines)
+    system += history_text
+
+    if not ANTHROPIC_API_KEY:
+        return "¡Hola! 🌴 El equipo de Two Travel revisará tu mensaje pronto."
+
+    try:
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        resp = client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=250,
+            system=system,
+            messages=[{"role": "user", "content": user_message}],
+        )
+        return resp.content[0].text.strip()
+    except Exception as e:
+        print(f"bot_reply_for_group error: {e}")
+        return "¡Hola! 🌴 Gracias por tu mensaje. El equipo te responderá pronto."
+
+def _is_question(text: str) -> bool:
+    t = text.strip()
+    return t.endswith("?") or any(t.lower().startswith(w) for w in
+        ["cuándo", "cuando", "qué", "que ", "cómo", "como ", "dónde", "donde", "a qué",
+         "cuál", "cual", "pueden", "puedo", "hay ", "tienen", "what", "when", "where",
+         "how ", "can ", "is there", "do you"])
+
+
 # ==================== CONFIG (ENV) ====================
-VERIFY_TOKEN = (os.getenv("WA_VERIFY_TOKEN") or "").strip()
-WA_TOKEN     = (os.getenv("WA_ACCESS_TOKEN") or "").strip()
-WA_PHONE_ID  = (os.getenv("WA_PHONE_NUMBER_ID") or "").strip()
+VERIFY_TOKEN   = (os.getenv("WA_VERIFY_TOKEN") or "").strip()
+WA_TOKEN       = (os.getenv("WA_ACCESS_TOKEN") or "").strip()
+WA_PHONE_ID    = (os.getenv("WA_PHONE_NUMBER_ID") or "").strip()
+WA_PHONE_NUMBER = (os.getenv("WA_PHONE_NUMBER") or "").strip()  # e.g. "573001234567"
 
 # Bot
 BOT_NAME = (os.getenv("BOT_NAME") or "Luna").strip()
+
+# Concierge bot config
+CONCIERGE_WA_NUMBERS = set(
+    n.strip() for n in (os.getenv("CONCIERGE_WA_NUMBERS") or "").split(",") if n.strip()
+)
+GROUP_ALERT_HOURS = float(os.getenv("GROUP_ALERT_HOURS", "2"))
 
 # HubSpot notify token (used by /hs-notify endpoint)
 HS_NOTIFY_TOKEN = (os.getenv("HS_NOTIFY_TOKEN") or "").strip()
@@ -1481,6 +1777,16 @@ async def incoming(req: Request):
         for change in entry.get("changes", []):
             value = change.get("value", {})
 
+            # ── Group message routing ──────────────────────────────────
+            # Detect group JID: group messages have conversation.id ending in @g.us
+            # or the message's "to" field is a group JID.
+            conv_id = (value.get("conversation") or {}).get("id") or ""
+            group_id = None
+            if "@g.us" in conv_id:
+                group_id = conv_id
+            # Also check individual messages for group indicator
+            # (some versions put it in m["conversation_id"])
+
             # Ignorar callbacks de estado (delivered/read/etc.)
             if value.get("statuses"):
                 continue
@@ -1500,11 +1806,42 @@ async def incoming(req: Request):
                 if msg_id:
                     LAST_MSGID[uid] = msg_id
 
+                # Also check per-message group indicator
+                msg_gid = group_id or (m.get("conversation_id") or "")
+                if msg_gid and "@g.us" not in msg_gid:
+                    msg_gid = None
+
                 # Texto / respuesta
                 text, reply_id = extract_text_or_reply(m)
                 txt_raw = (text or "").strip()
                 low_txt = txt_raw.lower()
                 rid = (reply_id or "").upper()
+
+                # ===== CONCIERGE DM MODE =====
+                if not msg_gid and is_concierge(user) and txt_raw:
+                    handle_concierge_dm(user, txt_raw)
+                    continue
+
+                # ===== GROUP MESSAGE MODE =====
+                if msg_gid and txt_raw:
+                    cfg = group_get_settings(msg_gid)
+                    sender_name = ""
+                    # Try to get sender name from contacts
+                    contacts = value.get("contacts", [])
+                    for c in contacts:
+                        if wa_click_number(c.get("wa_id", "")) == uid:
+                            sender_name = (c.get("profile") or {}).get("name", "")
+                            break
+                    ts = float(m.get("timestamp") or datetime.now().timestamp())
+                    group_add_message(msg_gid, sender_name or uid, txt_raw, ts)
+                    if _is_question(txt_raw):
+                        group_add_pending(msg_gid, sender_name or uid, txt_raw, ts)
+                    if cfg.get("autorespond") and not is_concierge(user):
+                        reply = bot_reply_for_group(msg_gid, txt_raw, sender_name)
+                        if reply:
+                            wa_send_text(msg_gid, reply)
+                            group_add_message(msg_gid, "Bot", reply, datetime.now().timestamp(), is_bot=True)
+                    continue
 
                 # ===== INICIO / RESTART =====
                 if low_txt in ("hola","hello","/start","start","inicio","menu"):
@@ -2250,3 +2587,96 @@ async def hs_notify(request: Request):
     print(f"hs-notify → {owner_name} ({owner_wa}): {result}")
 
     return {"ok": True, "sent_to": owner_name}
+
+
+# ==================== GROUP API (for ConciergePanel) ====================
+def _check_panel_token(request: Request) -> bool:
+    token = request.headers.get("X-Two-Token", "")
+    return not HS_NOTIFY_TOKEN or token == HS_NOTIFY_TOKEN
+
+@app.get("/group/{group_id}/settings")
+async def api_get_group_settings(group_id: str, request: Request):
+    if not _check_panel_token(request):
+        return {"error": "unauthorized"}
+    return group_get_settings(group_id)
+
+@app.post("/group/{group_id}/settings")
+async def api_save_group_settings(group_id: str, request: Request):
+    if not _check_panel_token(request):
+        return {"error": "unauthorized"}
+    body = await request.json()
+    cfg = group_get_settings(group_id)
+    cfg.update({k: v for k, v in body.items()
+                if k in ("monitor","autorespond","alertHours","kickoffId","conciergeWa","clientName")})
+    group_save_settings(group_id, cfg)
+    return {"ok": True, "settings": cfg}
+
+@app.get("/group/{group_id}/pending")
+async def api_get_group_pending(group_id: str, request: Request):
+    if not _check_panel_token(request):
+        return {"error": "unauthorized"}
+    return {"pending": group_get_pending(group_id), "count": len(group_get_pending(group_id))}
+
+@app.post("/group/{group_id}/clear-pending")
+async def api_clear_group_pending(group_id: str, request: Request):
+    if not _check_panel_token(request):
+        return {"error": "unauthorized"}
+    group_clear_pending(group_id)
+    return {"ok": True}
+
+@app.post("/group/{group_id}/send")
+async def api_send_to_group(group_id: str, request: Request):
+    """Send a message to a group directly from the panel."""
+    if not _check_panel_token(request):
+        return {"error": "unauthorized"}
+    body = await request.json()
+    text = (body.get("text") or "").strip()
+    if not text:
+        return {"error": "no text"}
+    result = wa_send_text(group_id, text)
+    if result.status_code == 200:
+        group_add_message(group_id, "Bot", text, datetime.now().timestamp(), is_bot=True)
+    return {"ok": result.status_code == 200, "status": result.status_code}
+
+@app.get("/bot-info")
+async def api_bot_info(request: Request):
+    """Return bot WhatsApp number for QR generation."""
+    if not _check_panel_token(request):
+        return {"error": "unauthorized"}
+    return {"phone": WA_PHONE_NUMBER, "name": BOT_NAME}
+
+
+# ==================== GROUP ALERTS CRON ====================
+@app.get("/cron/group-alerts")
+async def cron_group_alerts(request: Request):
+    token = request.query_params.get("token", "")
+    if token != FOLLOWUP_TOKEN:
+        return {"error": "unauthorized"}
+
+    if not _redis:
+        return {"ok": False, "reason": "no redis"}
+
+    now_ts = datetime.now().timestamp()
+    alerted = 0
+
+    for gid in group_list_all_ids():
+        cfg = group_get_settings(gid)
+        if not cfg.get("monitor"):
+            continue
+        concierge_wa = cfg.get("conciergeWa", "")
+        if not concierge_wa:
+            continue
+        alert_hours = float(cfg.get("alertHours") or GROUP_ALERT_HOURS)
+        pending = group_get_pending(gid)
+        overdue = [p for p in pending
+                   if (now_ts - float(p.get("ts", now_ts))) > (alert_hours * 3600)]
+        if overdue:
+            client_name = cfg.get("clientName") or cfg.get("kickoffId") or gid[:20]
+            lines = [f"⚠️ *{len(overdue)} pregunta(s) sin responder* — {client_name}:"]
+            for p in overdue[:3]:
+                age_h = (now_ts - float(p["ts"])) / 3600
+                lines.append(f"  · ({age_h:.1f}h) {p.get('sender','?')}: {p['text'][:100]}")
+            wa_send_text(concierge_wa, "\n".join(lines))
+            alerted += 1
+
+    return {"ok": True, "alerted": alerted}
