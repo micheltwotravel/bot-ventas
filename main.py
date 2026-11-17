@@ -345,6 +345,84 @@ def handle_concierge_dm(user: str, text: str):
     ))
 
 
+# ==================== OWNER (MICHEL) AI ASSISTANT MODE ====================
+def is_owner(user: str) -> bool:
+    if not OWNER_MICHEL_WA:
+        return False
+    return wa_click_number(user) == wa_click_number(OWNER_MICHEL_WA)
+
+OWNER_HISTORY_TTL = 60 * 60 * 6  # 6 horas
+
+def _owner_history_key(user: str) -> str:
+    return f"two_travel:wa:owner:{wa_click_number(user)}"
+
+def owner_get_history(user: str) -> list:
+    if _redis:
+        try:
+            raw = _redis.get(_owner_history_key(user))
+            return json.loads(raw) if raw else []
+        except Exception:
+            pass
+    return []
+
+def owner_save_history(user: str, history: list):
+    if _redis:
+        try:
+            _redis.setex(_owner_history_key(user), OWNER_HISTORY_TTL, json.dumps(history))
+        except Exception:
+            pass
+
+OWNER_SYSTEM = """Eres el asistente personal de IA de Michel, dueño de Two Travel, una agencia de viajes de lujo en Colombia (Cartagena, Islas del Rosario, Santa Marta, San Andrés).
+
+Michel te escribe desde su celular vía WhatsApp. Ayúdalo con lo que necesite:
+- Responder preguntas de clientes (redactar mensajes, dar info de servicios)
+- Resumir o analizar situaciones
+- Buscar ideas, itinerarios, cotizaciones
+- Tareas de trabajo: emails, decisiones, planificación
+- Cualquier pregunta general
+
+Contexto del negocio:
+- Servicios: lanchas, catamaranes, yates, tours de isla, paquetes VIP
+- CRM: HubSpot. Panel interno: concierge panel en twotravel-catalog (Vercel)
+- Equipo: Ray (ventas islas), Ross, concierges, junior staff
+- Clientes: turistas extranjeros y nacionales de alto poder adquisitivo
+
+Responde en el idioma que use Michel (español normalmente). Sé directo y útil. Si Michel comparte una conversación de un cliente, ayúdalo a redactar la respuesta. Para resetear el hilo escribe !reset."""
+
+def handle_owner_dm(user: str, text: str):
+    if text.strip().lower() in ("!reset", "/reset", "reset"):
+        owner_save_history(user, [])
+        wa_send_text(user, "🔄 Hilo reiniciado. ¿En qué te ayudo?")
+        return
+
+    history = owner_get_history(user)
+    history.append({"role": "user", "content": text})
+
+    # keep last 20 turns to avoid token bloat
+    if len(history) > 20:
+        history = history[-20:]
+
+    if not ANTHROPIC_API_KEY:
+        wa_send_text(user, "❌ ANTHROPIC_API_KEY no configurada.")
+        return
+
+    try:
+        ai = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        resp = ai.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1024,
+            system=OWNER_SYSTEM,
+            messages=history,
+        )
+        reply = resp.content[0].text.strip()
+        history.append({"role": "assistant", "content": reply})
+        owner_save_history(user, history)
+        wa_send_text(user, reply)
+    except Exception as e:
+        print(f"handle_owner_dm error: {e}")
+        wa_send_text(user, f"⚠️ Error al consultar IA: {e}")
+
+
 # ==================== GROUP MESSAGE HANDLER ====================
 def bot_reply_for_group(group_id: str, user_message: str, sender_name: str = "") -> str:
     cfg = group_get_settings(group_id)
@@ -438,6 +516,9 @@ OWNER_RAY_NAME  = "Ray Kanevsky"
 OWNER_RAY_WA    = (os.getenv("OWNER_RAY_WA") or os.getenv("OWNER_GLOBAL_WA") or "").strip()
 OWNER_ROSS_NAME = "Ross"
 OWNER_ROSS_WA   = (os.getenv("OWNER_ROSS_WA") or "").strip()
+
+# Michel (owner) — asistente IA personal via WA Business
+OWNER_MICHEL_WA = (os.getenv("OWNER_MICHEL_WA") or "").strip()
 
 # Catálogo
 GOOGLE_SHEET_CSV_URL = (os.getenv("GOOGLE_SHEET_CSV_URL") or "").strip()
@@ -1816,6 +1897,11 @@ async def incoming(req: Request):
                 txt_raw = (text or "").strip()
                 low_txt = txt_raw.lower()
                 rid = (reply_id or "").upper()
+
+                # ===== OWNER (MICHEL) AI ASSISTANT MODE =====
+                if not msg_gid and is_owner(user) and txt_raw:
+                    handle_owner_dm(user, txt_raw)
+                    continue
 
                 # ===== CONCIERGE DM MODE =====
                 if not msg_gid and is_concierge(user) and txt_raw:
